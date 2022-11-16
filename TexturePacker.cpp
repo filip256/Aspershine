@@ -2,10 +2,12 @@
 #include <iostream>
 #include <fstream>
 #include <windows.h>
+#include <shlwapi.h>
 #include <thread>
 #include <atomic>
 
-#define MAX_PATH 4096
+#define FILE_MAX_PATH 4096
+#define VERSION "0.0.1"
 
 namespace util
 {
@@ -20,24 +22,26 @@ namespace util
 
 		return true;
 	}
+
+	inline std::wstring toWide(const std::string& str) {
+		return std::wstring(str.begin(), str.end());
+	}
 }
+
+
 
 namespace os
 {
-	//https://learn.microsoft.com/en-us/windows/win32/api/commdlg/ns-commdlg-openfilenamea
-	//https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/ms646932(v=vs.85)
-	//https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessage
 	class OpenFileDialog
 	{
-		bool _started = false;
 		std::atomic<bool> _ready;
-		wchar_t _path[MAX_PATH] = { 0 };
+		wchar_t _path[FILE_MAX_PATH] = { 0 };
 		std::thread *_thr = nullptr;
 		OPENFILENAME _ofn = { sizeof(OPENFILENAME) };
 
 		static void _kern(OPENFILENAME *ofn, std::atomic<bool>* ready)
 		{
-			GetOpenFileNameW(ofn);
+			GetOpenFileName(ofn);
 			*ready = true;
 		}
 
@@ -49,44 +53,34 @@ namespace os
 			_ofn.lpstrFilter = filter;
 			_ofn.lpstrDefExt = L".txt";
 			_ofn.lpstrFile = _path;
-			_ofn.nMaxFile = MAX_PATH;
+			_ofn.nMaxFile = FILE_MAX_PATH;
 			_ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST;
 			if (allowMultiple) _ofn.Flags = OFN_ALLOWMULTISELECT;
 		}
 
-		void kill()
+		void start()
 		{
-			if (_thr)
+			if (!_thr)
 			{
-				_started = false;
-				_thr->detach();
-				delete _thr;
-				_thr = nullptr;
+				memset(_path, 0, FILE_MAX_PATH);
+				_ready = false;
+				_thr = new std::thread(_kern, &_ofn, &_ready);
 			}
 		}
 
-		void start()
-		{
-			kill();
-			memset(_path, 0, MAX_PATH);
-			_ready = false;
-			_started = true;
-			_thr = new std::thread(_kern, &_ofn, &_ready);
-		}
-
 		bool isReady() const { return _ready.load(); }
-		bool isStarted() const { return _started; }
+		bool isStarted() const { return _thr != nullptr; }
 
 		std::wstring getPath()
 		{
 			if (_thr)
 			{
-				_started = false;
 				_thr->join();
 				delete _thr;
 				_thr = nullptr;
 				return std::wstring(_path);
 			}
+			return std::wstring();
 		}
 	};
 	class SystemData
@@ -152,13 +146,15 @@ namespace img
 	class ImageBox
 	{
 		bool _isSelected = false;
+		std::string _nameTag;
 		sf::Image _im;
 		sf::Texture _tx;
 		sf::Sprite _sp;
 
 	public:
 
-		ImageBox(const std::string& sourcefile = "")
+		ImageBox(const std::string& nameTag, const std::string& sourcefile = "") :
+			_nameTag(nameTag)
 		{
 			setImage(sourcefile);
 		}
@@ -179,6 +175,7 @@ namespace img
 		}
 
 		inline sf::Vector2f getPosition() const { return _sp.getPosition(); }
+		inline std::string getNameTag() const { return _nameTag; }
 
 		inline void setSelect(const bool boolean) { _isSelected = boolean; }
 		inline void setPosition(const sf::Vector2f& position) { _sp.setPosition(position);}
@@ -209,6 +206,11 @@ namespace img
 		static size_t instanceCount;
 	};
 	size_t ImageBox::instanceCount = 0;
+	std::ostream& operator<<(std::ostream& os, const ImageBox& obj)
+	{
+		os << "{\n" << obj.getNameTag() << "},\n";
+		return os;
+	}
 
 	class ImageVector
 	{
@@ -270,6 +272,8 @@ namespace img
 				_images.back()->setPosition(_position);
 		}
 
+		inline size_t size() const { return _images.size(); }
+
 		inline void setScale(const sf::Vector2f& scale)
 		{
 			_scale = scale;
@@ -320,11 +324,22 @@ namespace img
 			for (size_t i = 0; i < _images.size(); ++i)
 				window.draw(_images[i]->getDrawObject());
 		}
+
+		const ImageBox& operator[](std::size_t idx) const { return *_images[idx]; }
 	};
+	std::ostream& operator<<(std::ostream& os, const ImageVector& obj)
+	{
+		os << "[\n";
+		for (size_t i = 0; i < obj.size(); ++i)
+			os << obj[i] << '\n';
+		os << "]\n";
+		return os;
+	}
 }
 
 namespace ui
 {
+	using namespace img;
 	class Defined
 	{
 	public:
@@ -339,14 +354,17 @@ namespace ui
 		static sf::Font DefaultFont;
 		static sf::Text DefaultText;
 
-		static sf::Texture Icons;
+		static const sf::Color DarkGrey;
+		static const sf::Color Grey;
+		static const sf::Color DarkCyan;
 
 		static bool load()
 		{
-			DefaultFont.loadFromFile("texgyreadventor-regular.otf");
+			if (!DefaultFont.loadFromFile("texgyreadventor-regular.otf"))
+				return false;
 			DefaultText.setFont(DefaultFont);
 
-			Icons.loadFromFile("iconsc.png");
+			return true;
 		}
 	};
 	const std::wstring Defined::SupportedImageFormats = L"Image files (.bmp, .png, .tga, .jpg, .gif, .psd, .hdr, .pic)\0.bmp;.png;.tga;.jpg;.gif;.psd;.hdr;.pic\0";
@@ -355,9 +373,9 @@ namespace ui
 	const std::string Defined::Numeric = "-0123456789";
 	sf::Font Defined::DefaultFont;
 	sf::Text Defined::DefaultText;
-	sf::Texture Defined::Icons;
-
-	using namespace img;
+	const sf::Color Defined::DarkGrey = sf::Color(20, 20, 20, 255);
+	const sf::Color Defined::Grey = sf::Color(50, 50, 50, 255);
+	const sf::Color Defined::DarkCyan = sf::Color(11, 129, 133, 255);
 
 	enum ActionEvent
 	{
@@ -378,7 +396,23 @@ namespace ui
 		TICKBOX_MODIFIED_1,
 		TICKBOX_MODIFIED_2,
 		TICKBOX_MODIFIED_3,
+
+		ADD_IMAGE,
+
+		CONTINUE_1
 	};
+	class ActionResult
+	{
+	public:
+		const ActionEvent eventTag;
+		const std::string obj;
+
+		ActionResult(const ActionEvent event = ActionEvent::NONE, const std::string& object = "") :
+			eventTag(event),
+			obj(object)
+		{}
+	};
+	inline bool operator==(const ActionResult& lhs, const ActionResult& rhs) { return lhs.eventTag == rhs.eventTag; }
 
 	class Background
 	{
@@ -392,9 +426,12 @@ namespace ui
 			_back.setFillColor(color);
 		}
 
-		inline void setFillColor(sf::Color& color) { _back.setFillColor(color); }
+		inline bool contains(const sf::Vector2f& point) const { return _back.getGlobalBounds().contains(point); }
 
-		inline void draw(sf::RenderWindow& window)
+		inline void setPosition(const sf::Vector2f& position) { _back.setPosition(position); }
+		inline void setFillColor(const sf::Color& color) { _back.setFillColor(color); }
+
+		inline void draw(sf::RenderWindow& window) const
 		{
 			window.draw(_back);
 		}
@@ -466,7 +503,12 @@ namespace ui
 			_back.setOutlineColor(sf::Color(fillColor.r + 100, fillColor.g + 100, fillColor.b + 100, fillColor.a));
 		}
 
-		inline bool contains(const sf::Vector2f& point) { return _back.getGlobalBounds().contains(point); }
+		inline virtual void setPosition(const sf::Vector2f& position)
+		{
+			_back.setPosition(position);
+		}
+
+		inline bool contains(const sf::Vector2f& point) const { return _back.getGlobalBounds().contains(point); }
 
 		inline const ActionEvent click() const { return _returnEvent; }
 
@@ -484,7 +526,7 @@ namespace ui
 	public:
 		TickBox(const sf::Vector2f& size, const sf::Vector2f& position, const ActionEvent returnEvent, const bool isTicked = false, const sf::Color& fillColor = sf::Color(0, 0, 0, 0)) :
 			Button(size, position, returnEvent, fillColor),
-			_tickSprite(Defined::Icons),
+			//_tickSprite(Defined::Icons),
 			_isTicked(isTicked)
 		{
 			_tickSprite.setColor(sf::Color::Green);
@@ -545,6 +587,12 @@ namespace ui
 				_text.setPosition(position.x + 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
 			else if (alignment == TextAlignment::Right)
 				_text.setPosition(position.x + size.x - _text.getGlobalBounds().width - 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
+		}
+
+		inline void setPosition(const sf::Vector2f& position) override
+		{
+			_text.setPosition(position);
+			_back.setPosition(position);
 		}
 
 		void draw(sf::RenderWindow& window, const sf::Vector2f& point) override
@@ -837,7 +885,6 @@ namespace ui
 
 	};
 
-
 	template<class T> class Vector
 	{
 		std::vector<T*> _content;
@@ -893,47 +940,232 @@ namespace ui
 		}
 	};
 
-	class EditorTab
+	class AtlasOptionsMenu
 	{
-		ImageVector _content;
-		std::string _name;
-		sf::RectangleShape _background;
+		bool _isOpen = false;
+		Background _back;
+		TextButton _addImageB;
 
 	public:
-		EditorTab(const sf::Vector2f& size, const sf::Vector2f& position, const std::string& name = "New Tab") :
-			_background(size),
-			_name(name)
+		AtlasOptionsMenu() :
+			_back(sf::Vector2f(70.0, 20.0), sf::Vector2f(0.0, 0.0), Defined::Grey),
+			_addImageB(sf::Vector2f(70.0, 20.0), sf::Vector2f(0.0, 0.0), 16, "Add Image", ActionEvent::NONE)
+		{}
+
+		inline void open(const sf::Vector2f& position) 
+		{ 
+			_isOpen = true;
+			setPosition(position);
+		}
+		inline void close() { _isOpen = false; }
+		inline bool isOpen() const { return _isOpen; }
+
+		void setPosition(const sf::Vector2f& position)
 		{
-			_background.setFillColor(sf::Color(150, 150, 150, 255));
+			_back.setPosition(position);
+			_addImageB.setPosition(position);
 		}
 
-		inline void draw(sf::RenderWindow& window) const 
+		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
-			window.draw(_background);
-			_content.draw(window);
+			if (event.type == sf::Event::MouseButtonReleased)
+				if (_addImageB.contains(mousePosition))
+					return ActionEvent::ADD_IMAGE;
+			return ActionEvent::NONE;
+		}
+
+		void draw(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			_back.draw(window);
+			_addImageB.draw(window, point);
+		}
+	};
+
+	class Atlas
+	{
+		std::string _name;
+		ImageVector _images;
+		Background _back;
+
+	public:
+		Atlas(const std::string& name = "New Atlas") :
+			_name(name),
+			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), sf::Color(200, 200, 200, 255))
+		{}
+
+		inline std::string getName() const { return _name; }
+
+		bool dumpToFile(std::wstring path)
+		{
+			unsigned short int cnt = 1;
+			std::wstring temp = path, copyTemp = temp;
+			while (PathIsDirectory(temp.c_str()))
+			{
+				temp = copyTemp + L'(' + std::to_wstring(cnt) + L')';
+				++cnt;
+			}
+
+			std::ofstream out(temp);
+			if (out.bad())
+				return false;
+
+			out << VERSION << '\n' << _name << '\n' << _images;
+			out.close();
+
+			return true;
+		}
+
+		inline bool contains(const sf::Vector2f& point) const { return _back.contains(point); }
+
+		inline void draw(sf::RenderWindow& window) const
+		{
+			_back.draw(window);
+			_images.draw(window);
+		}
+
+		static Atlas loadFromFile(std::wstring path)
+		{
+			return Atlas("New loaded atlas");
 		}
 	};
 
 	class EditorUI
 	{
 		sf::RenderWindow& _window;
-		std::vector<EditorTab> _tabs;
+		sf::Mouse _mouse;
+		std::vector<Atlas> _tabs;
 		size_t _frontTab = 0;
+
+		Background _generalBg, _upBg, _downBg, _leftBg, _rightBg;
+		SelectableTextButton _fileB, _settingsB;
+		Vector<Button> _tabButtons;
+		AtlasOptionsMenu _optionsMenu;
+
+		ActionEvent _handleDefaultEvents()
+		{
+			sf::Event event;
+			bool rightClick = false;
+			while (_window.pollEvent(event))
+			{
+				const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
+				if (_optionsMenu.isOpen())
+					if(_optionsMenu.handleEvent(event, mousePos) == ActionEvent::ADD_IMAGE)
+						continue;
+				
+				switch (event.type)
+				{
+				case sf::Event::MouseButtonPressed:
+				{
+					if (sf::Mouse::isButtonPressed(sf::Mouse::Right))
+						rightClick = true;
+					else
+						rightClick = false;
+				}
+				break;
+
+				case sf::Event::MouseButtonReleased:
+				{
+					if (!rightClick)
+					{
+						_optionsMenu.close();
+						//click buttons
+						const Button* button = _tabButtons.contains(mousePos);
+						if (button)
+						{
+							button->click();
+						}
+
+						if (_fileB.contains(mousePos))
+						{
+							_fileB.setSelected(true);
+						}
+						else _fileB.setSelected(false);
+
+						if (_settingsB.contains(mousePos))
+						{
+							_settingsB.setSelected(true);
+						}
+						else _settingsB.setSelected(false);
+					}
+					else if (rightClick)
+					{
+						if (_tabs[_frontTab].contains(mousePos))
+							_optionsMenu.open(mousePos);
+						else
+							_optionsMenu.close();
+					}
+
+				}
+				break;
+
+				case sf::Event::Closed:
+					return ActionEvent::WINDOW_CLOSED;
+				}
+			}
+			return ActionEvent::NONE;
+		}
+
+		void _selectTab(size_t tabIdx)
+		{
+			if (tabIdx < _tabs.size())
+			{
+				_frontTab = tabIdx;
+			}
+		}
+
+		void _displayEditor()
+		{
+			const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
+			_window.clear();
+
+			//_generalBg.draw(_window);
+
+			_tabs[_frontTab].draw(_window);
+
+			_upBg.draw(_window);
+			_leftBg.draw(_window);
+			_downBg.draw(_window);
+			_rightBg.draw(_window);
+
+			_fileB.draw(_window, mousePos);
+			_settingsB.draw(_window, mousePos);
+
+			_tabButtons.drawAll(_window, mousePos);
+
+			if (_optionsMenu.isOpen())
+				_optionsMenu.draw(_window, mousePos);
+
+			_window.display();
+		}
 
 	public:
 		EditorUI(sf::RenderWindow& window) :
-			_window(window)
+			_window(window),
+			_generalBg(sf::Vector2f(window.getSize().x, window.getSize().y), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
+			_upBg(sf::Vector2f(window.getSize().x, 74.0), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
+			_leftBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
+			_downBg(sf::Vector2f(window.getSize().x, 25.0), sf::Vector2f(0.0, 775.0), Defined::DarkGrey),
+			_rightBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(1190.0, 0.0), Defined::DarkGrey),
+			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
+			_settingsB(sf::Vector2f(90.0, 24.0), sf::Vector2f(50.0, 0.0), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey)
 		{}
 
-		void run()
+		void addAtlas(const Atlas& atlas)
+		{
+			_tabs.push_back(atlas);
+			_tabButtons.add(new SelectableTextButton(sf::Vector2f(100.0, 24.0), sf::Vector2f((_tabs.size() - 1) * 100.0 + 10.0, 50.0), 14, atlas.getName(), ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, Defined::DarkGrey));
+			_selectTab(_tabs.size() - 1);
+		}
+
+		ActionResult run()
 		{
 			while (_window.isOpen())
 			{
-				if (_tabs.size() == 0) // start menu
-				{
-					//_handleEvents();
-					//_display();
-				}
+				const ActionResult responseEvent = _handleDefaultEvents();
+				if (responseEvent == ActionEvent::WINDOW_CLOSED)
+					return responseEvent;
+
+				_displayEditor();
 			}
 
 		}
@@ -965,7 +1197,7 @@ namespace ui
 		os::OpenFileDialog _openFileDialog;
 
 
-		ActionEvent _handleDefaultEvents()
+		ActionResult _handleDefaultEvents()
 		{
 			sf::Event event;
 			while (_window.pollEvent(event))
@@ -985,9 +1217,6 @@ namespace ui
 
 					if (_newButton.contains(mousePos))
 					{
-						if (_openFileDialog.isStarted())
-							_openFileDialog.kill();
-
 						_newButton.setSelected(true);
 						_state = StateTag::NEW_RGBA_ATLAS;
 					}
@@ -1006,8 +1235,9 @@ namespace ui
 					return ActionEvent::WINDOW_CLOSED;
 				}
 			}
+			return ActionEvent::NONE;
 		}
-		ActionEvent _handleNewAtlasEvents()
+		ActionResult _handleNewAtlasEvents()
 		{
 			sf::Event event;
 			while (_window.pollEvent(event))
@@ -1026,9 +1256,12 @@ namespace ui
 						_openButton.setSelected(true);
 						_newButton.setSelected(false);
 						_state = StateTag::NONE;
-						//_displayStartMenu();
 						_openFileDialog.start();
-						//os::SystemData::runOpenFileDialog(Defined::SupportedImageFormats.c_str());
+					}
+
+					if (_continueButton.contains(mousePos))
+					{
+						return ActionResult(ActionEvent::CONTINUE_1, _nameBox.getContent());
 					}
 				}
 				break;
@@ -1064,9 +1297,10 @@ namespace ui
 					return ActionEvent::WINDOW_CLOSED;
 				}
 			}
+			return ActionEvent::NONE;
 		}
 
-		ActionEvent _handleEvents()
+		ActionResult _handleEvents()
 		{
 			switch (_state)
 			{
@@ -1109,18 +1343,18 @@ namespace ui
 	public:
 		StartMenuUI(sf::RenderWindow& window) :
 			_window(window),
-			_back1(sf::Vector2f(300.0, window.getSize().y), sf::Vector2f(0.0, 0.0), sf::Color(sf::Color(20, 20, 20, 255))),
+			_back1(sf::Vector2f(300.0, window.getSize().y), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
 			_back2(sf::Vector2f(window.getSize().x - 300, window.getSize().y), sf::Vector2f(300.0, 0.0), sf::Color(sf::Color(40, 40, 40, 255))),
 			_recentsTextBox(sf::Vector2f(50.0, 200.0), 16, "Recent files:", Defined::DefaultFont, sf::Color(11, 129, 133, 255)),
 			_newButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 50.0), 18, "Create New Atlas", ActionEvent::BUTTON_CLICKED_1, Defined::DefaultFont, TextAlignment::Left, sf::Color(40, 40, 40, 255)),
 			_openButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 120.0), 18, "Open Existing Atlas", ActionEvent::BUTTON_CLICKED_2, Defined::DefaultFont, TextAlignment::Left, sf::Color(40, 40, 40, 255)),
 			_enterNameTextBox(sf::Vector2f(350.0, 50.0), 14, "New Atlas Name: ", Defined::DefaultFont, sf::Color(180, 180, 180, 255)),
-			_nameBox(sf::Vector2f(400.0, 50.0), sf::Vector2f(350.0, 70.0), 16, "NewAtlas", ActionEvent::INPUTBOX_ENTER_1, Defined::DefaultFont, Defined::AlphaNumeric, sf::Color(20, 20, 20, 255)),
-			_tickBox(sf::Vector2f(20.0, 20.0), sf::Vector2f(350.0, 130.0), ActionEvent::TICKBOX_MODIFIED_1, false, sf::Color(20, 20, 20, 255)),
-			_continueButton(sf::Vector2f(100.0, 40.0), sf::Vector2f(1050.0, 720.0), 18, "Continue", ActionEvent::BUTTON_CLICKED_3, Defined::DefaultFont, TextAlignment::Center, sf::Color(11, 129, 133, 255)),
-			_intBox(sf::Vector2f(60.0, 40.0), sf::Vector2f(300.0, 170.0), 16, 0, 255, ActionEvent::INPUTBOX_ENTER_2, Defined::DefaultFont, sf::Color(20, 20, 20, 255), sf::Color(255, 255, 0, 255)),
+			_nameBox(sf::Vector2f(400.0, 50.0), sf::Vector2f(350.0, 70.0), 16, "NewAtlas", ActionEvent::INPUTBOX_ENTER_1, Defined::DefaultFont, Defined::AlphaNumeric, Defined::DarkGrey),
+			_tickBox(sf::Vector2f(20.0, 20.0), sf::Vector2f(350.0, 130.0), ActionEvent::TICKBOX_MODIFIED_1, false, Defined::DarkGrey),
+			_continueButton(sf::Vector2f(100.0, 40.0), sf::Vector2f(1050.0, 720.0), 18, "Continue", ActionEvent::BUTTON_CLICKED_3, Defined::DefaultFont, TextAlignment::Center, Defined::DarkCyan),
+			_intBox(sf::Vector2f(60.0, 40.0), sf::Vector2f(300.0, 170.0), 16, 0, 255, ActionEvent::INPUTBOX_ENTER_2, Defined::DefaultFont, Defined::DarkGrey, sf::Color(255, 255, 0, 255)),
 			_colBox(50.0, sf::Vector2f(400.0, 170.0), &_intBox),
-			_openFileDialog(os::SystemData::hwnd)
+			_openFileDialog(_window.getSystemHandle())
 		{
 			std::ifstream recentIn("recents.txt");
 			if (recentIn.good())
@@ -1145,15 +1379,20 @@ namespace ui
 
 		}
 
-		ActionEvent run()
+		ActionResult run()
 		{
 			while (true)
 			{
 				if (_openFileDialog.isStarted() && _openFileDialog.isReady())
-					std::wcout << _openFileDialog.getPath();
+				{
+					_openButton.setSelected(false);
+					std::wcout << _openFileDialog.getPath() << '\n';
+				}
 
-				if(_handleEvents() == ActionEvent::WINDOW_CLOSED)
-					return ActionEvent::WINDOW_CLOSED;
+				const ActionResult responseEvent = _handleEvents();
+				if(responseEvent == ActionEvent::WINDOW_CLOSED || responseEvent == ActionEvent::CONTINUE_1)
+					return responseEvent;
+
 				_displayStartMenu();
 			}
 			return ActionEvent::NONE;
@@ -1311,22 +1550,36 @@ namespace ui
 			_editor(_window)
 		{
 			_window.setFramerateLimit(60);
-
-			if(_startMenu.run() == ActionEvent::WINDOW_CLOSED)
-				_window.close();
+			run();
 		}
-
-
+		
+		void run()
+		{
+			while (_window.isOpen())
+			{
+				ActionResult returnEvent = _startMenu.run();
+				if (returnEvent == ActionEvent::WINDOW_CLOSED)
+					_window.close();
+				else if (returnEvent == ActionEvent::CONTINUE_1)
+				{
+					_editor.addAtlas(Atlas(returnEvent.obj));
+					_editor.run();
+				}
+			}
+		}
 	};
-
 }
 
 int main()
 {
-	ui::Defined::load();
-	ui::UIDriver driver(sf::VideoMode(1200, 800));
-	std::cout << img::ImageBox::instanceCount;
-	getchar();
+	if (ui::Defined::load())
+	{
+		ui::UIDriver driver(sf::VideoMode(1200, 800));
+		std::cout << img::ImageBox::instanceCount;
+		getchar();
+	}
+	else
+		std::cout << "Failed to load!\n";
 
 	return 0;
 }
