@@ -5,6 +5,8 @@
 #include <shlwapi.h>
 #include <thread>
 #include <atomic>
+#include <locale>
+#include <codecvt>
 
 #define FILE_MAX_PATH 4096
 #define VERSION "0.0.1"
@@ -23,8 +25,66 @@ namespace util
 		return true;
 	}
 
-	inline std::wstring toWide(const std::string& str) {
-		return std::wstring(str.begin(), str.end());
+	inline std::wstring toWide(const std::string& str)
+	{
+		using convert_typeX = std::codecvt_utf8<wchar_t>;
+		std::wstring_convert<convert_typeX, wchar_t> converterX;
+
+		return converterX.from_bytes(str);
+	}
+
+	inline std::string toString(const std::wstring& wstr)
+	{
+		using convert_typeX = std::codecvt_utf8<wchar_t>;
+		std::wstring_convert<convert_typeX, wchar_t> converterX;
+
+		return converterX.to_bytes(wstr);
+	}
+
+	std::vector<std::string> separatePaths(const std::string& str)
+	{
+		bool multiple = false;
+		std::vector<std::string> result;
+		size_t i = str.find('\n'), last = i;
+		std::string aux = str.substr(0, i);
+		++i;
+		while (i < str.size())
+		{
+			if (str[i] == '\n')
+			{
+				result.push_back(aux + '\\' + str.substr(last + 1, i - last - 1));
+				last = i;
+				multiple = true;
+			}
+			++i;
+		}
+		if (multiple)
+			result.push_back(aux + '\\' + str.substr(last + 1));
+		else
+			result.push_back(aux);
+		return result;
+	}
+
+	std::wstring replaceWithEndl(const wchar_t* str)
+	{
+		if (str[0] == '\0')
+			return std::wstring();
+
+		std::wstring result;
+		size_t i = 0;
+		while (true)
+		{
+			if (str[i] == '\0')
+			{
+				if (str[i + 1] == '\0')
+					return result;
+				result += '\n';
+			}
+			else
+				result += str[i];
+			++i;
+		}
+		return result;
 	}
 }
 
@@ -54,8 +114,8 @@ namespace os
 			_ofn.lpstrDefExt = L".txt";
 			_ofn.lpstrFile = _path;
 			_ofn.nMaxFile = FILE_MAX_PATH;
-			_ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST;
-			if (allowMultiple) _ofn.Flags = OFN_ALLOWMULTISELECT;
+			if (allowMultiple) _ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST;
+			else _ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST;
 		}
 
 		void start()
@@ -78,9 +138,9 @@ namespace os
 				_thr->join();
 				delete _thr;
 				_thr = nullptr;
-				return std::wstring(_path);
 			}
-			return std::wstring();
+
+			return util::replaceWithEndl(_path);
 		}
 	};
 	class SystemData
@@ -168,7 +228,7 @@ namespace img
 		void setImage(const std::string& sourcefile)
 		{
 			if (sourcefile.length() == 0 || !_im.loadFromFile(sourcefile))
-				_im.loadFromFile("ui\\missing.png");
+				_im.loadFromFile("iconsc.png");
 			_tx.create(_im.getSize().x, _im.getSize().y);
 			_tx.update(_im);
 			_sp.setTexture(_tx);
@@ -176,6 +236,7 @@ namespace img
 
 		inline sf::Vector2f getPosition() const { return _sp.getPosition(); }
 		inline std::string getNameTag() const { return _nameTag; }
+		inline bool isSelected() const { return _isSelected; }
 
 		inline void setSelect(const bool boolean) { _isSelected = boolean; }
 		inline void setPosition(const sf::Vector2f& position) { _sp.setPosition(position);}
@@ -252,14 +313,20 @@ namespace img
 			other._images.clear();
 		}
 
-		inline void addImage(const std::string& sourcefile = "")
+		inline void addImage(const std::string& name, const std::string& sourcefile)
 		{
-			_images.push_back(new ImageBox(sourcefile));
+			_images.push_back(new ImageBox(name, sourcefile));
 			_images.back()->applyScale(_scale);
 			if (_images.size() > 1)
 				_images.back()->setPosition(sf::Vector2f(_images[_images.size() - 2]->getPosition() + sf::Vector2f(20.0, 20.0)));
 			else
 				_images.back()->setPosition(_position);
+		}
+
+		inline void addImage(const std::string& sourcefile)
+		{
+			const std::string aux = sourcefile.substr(sourcefile.rfind('\\') + 1);
+			addImage(aux.substr(0, aux.rfind('.')), sourcefile);
 		}
 
 		inline void addImage(ImageBox& image)
@@ -274,24 +341,27 @@ namespace img
 
 		inline size_t size() const { return _images.size(); }
 
-		inline void setScale(const sf::Vector2f& scale)
+		inline void setScale(const sf::Vector2f& scale, const bool selectedOnly = false)
 		{
 			_scale = scale;
 			for (size_t i = 0; i < _images.size(); ++i)
-				_images[i]->setScale(scale);
+				if (!selectedOnly || _images[i]->isSelected())
+					_images[i]->setScale(scale);
 		}
-		inline void setPosition(const sf::Vector2f& position)
+		inline void setPosition(const sf::Vector2f& position, const bool selectedOnly = false)
 		{
 			const sf::Vector2f delta = position - _position;
 			_position = position;
 			for (size_t i = 0; i < _images.size(); ++i)
-				_images[i]->move(delta);
+				if (!selectedOnly || _images[i]->isSelected())
+					_images[i]->move(delta);
 		}
-		inline void applyScale(const sf::Vector2f& scale)
+		inline void applyScale(const sf::Vector2f& scale, const bool selectedOnly = false)
 		{
 			_scale = _scale * scale;
 			for (size_t i = 0; i < _images.size(); ++i)
-				_images[i]->applyScale(scale);
+				if(!selectedOnly || _images[i]->isSelected())
+					_images[i]->applyScale(scale);
 		}
 
 		void deselectAll()
@@ -553,6 +623,7 @@ namespace ui
 	{
 	protected:
 		sf::Text _text;
+		const TextAlignment _alignment;
 
 	public:
 		TextButton(
@@ -567,7 +638,8 @@ namespace ui
 			const sf::Color& textColor = sf::Color(255, 255, 255, 255)
 		) :
 			Button(size, position, returnEvent, fillColor),
-			_text(text, font, textSize)
+			_text(text, font, textSize),
+			_alignment(alignment)
 		{
 			_text.setFillColor(textColor);
 			
@@ -591,7 +663,12 @@ namespace ui
 
 		inline void setPosition(const sf::Vector2f& position) override
 		{
-			_text.setPosition(position);
+			if (_alignment == TextAlignment::Center)
+				_text.setPosition(static_cast<int>(position.x + (_back.getSize().x - _text.getGlobalBounds().width) / 2.0), static_cast<int>(position.y + (_back.getSize().y - _text.getGlobalBounds().height) / 2.0));
+			else if (_alignment == TextAlignment::Left)
+				_text.setPosition(position.x + 5, static_cast<int>(position.y + (_back.getSize().y - _text.getGlobalBounds().height) / 2.0));
+			else if (_alignment == TextAlignment::Right)
+				_text.setPosition(position.x + _back.getSize().x - _text.getGlobalBounds().width - 5, static_cast<int>(position.y + (_back.getSize().y - _text.getGlobalBounds().height) / 2.0));
 			_back.setPosition(position);
 		}
 
@@ -948,8 +1025,8 @@ namespace ui
 
 	public:
 		AtlasOptionsMenu() :
-			_back(sf::Vector2f(70.0, 20.0), sf::Vector2f(0.0, 0.0), Defined::Grey),
-			_addImageB(sf::Vector2f(70.0, 20.0), sf::Vector2f(0.0, 0.0), 16, "Add Image", ActionEvent::NONE)
+			_back(sf::Vector2f(100.0, 20.0), sf::Vector2f(0.0, 0.0), Defined::Grey),
+			_addImageB(sf::Vector2f(100.0, 20.0), sf::Vector2f(0.0, 0.0), 14, "Add Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey)
 		{}
 
 		inline void open(const sf::Vector2f& position) 
@@ -968,7 +1045,7 @@ namespace ui
 
 		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
-			if (event.type == sf::Event::MouseButtonReleased)
+			if (event.type == sf::Event::MouseButtonPressed)
 				if (_addImageB.contains(mousePosition))
 					return ActionEvent::ADD_IMAGE;
 			return ActionEvent::NONE;
@@ -991,7 +1068,11 @@ namespace ui
 		Atlas(const std::string& name = "New Atlas") :
 			_name(name),
 			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), sf::Color(200, 200, 200, 255))
-		{}
+		{
+			_images.setPosition(sf::Vector2f(10.0, 74.0));
+		}
+
+		inline ImageVector& accessData() { return _images; }
 
 		inline std::string getName() const { return _name; }
 
@@ -1041,6 +1122,8 @@ namespace ui
 		Vector<Button> _tabButtons;
 		AtlasOptionsMenu _optionsMenu;
 
+		os::OpenFileDialog _openFileDialog;
+
 		ActionEvent _handleDefaultEvents()
 		{
 			sf::Event event;
@@ -1049,23 +1132,14 @@ namespace ui
 			{
 				const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
 				if (_optionsMenu.isOpen())
-					if(_optionsMenu.handleEvent(event, mousePos) == ActionEvent::ADD_IMAGE)
-						continue;
+					if (_optionsMenu.handleEvent(event, mousePos) == ActionEvent::ADD_IMAGE)
+						_openFileDialog.start();
 				
 				switch (event.type)
 				{
 				case sf::Event::MouseButtonPressed:
 				{
-					if (sf::Mouse::isButtonPressed(sf::Mouse::Right))
-						rightClick = true;
-					else
-						rightClick = false;
-				}
-				break;
-
-				case sf::Event::MouseButtonReleased:
-				{
-					if (!rightClick)
+					if (sf::Mouse::isButtonPressed(sf::Mouse::Left))
 					{
 						_optionsMenu.close();
 						//click buttons
@@ -1086,11 +1160,13 @@ namespace ui
 							_settingsB.setSelected(true);
 						}
 						else _settingsB.setSelected(false);
+
+						_tabs[_frontTab].accessData().select(mousePos);
 					}
-					else if (rightClick)
+					else
 					{
 						if (_tabs[_frontTab].contains(mousePos))
-							_optionsMenu.open(mousePos);
+							_optionsMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
 						else
 							_optionsMenu.close();
 					}
@@ -1098,6 +1174,14 @@ namespace ui
 				}
 				break;
 
+				case sf::Event::MouseWheelMoved:
+				{
+					if(event.mouseWheel.delta > 0)
+						_tabs[_frontTab].accessData().applyScale(sf::Vector2f(1.1, 1.1), true);
+					else
+						_tabs[_frontTab].accessData().applyScale(sf::Vector2f(0.9, 0.9), true);
+				}
+				break;
 				case sf::Event::Closed:
 					return ActionEvent::WINDOW_CLOSED;
 				}
@@ -1147,7 +1231,8 @@ namespace ui
 			_downBg(sf::Vector2f(window.getSize().x, 25.0), sf::Vector2f(0.0, 775.0), Defined::DarkGrey),
 			_rightBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(1190.0, 0.0), Defined::DarkGrey),
 			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_settingsB(sf::Vector2f(90.0, 24.0), sf::Vector2f(50.0, 0.0), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey)
+			_settingsB(sf::Vector2f(90.0, 24.0), sf::Vector2f(50.0, 0.0), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
+			_openFileDialog(window.getSystemHandle(), L"All files\0*.*\0", nullptr, true)
 		{}
 
 		void addAtlas(const Atlas& atlas)
@@ -1161,6 +1246,13 @@ namespace ui
 		{
 			while (_window.isOpen())
 			{
+				if (_openFileDialog.isStarted() && _openFileDialog.isReady())
+				{
+					std::vector<std::string> paths = util::separatePaths(util::toString(_openFileDialog.getPath()));
+					for (int i = 0; i < paths.size(); ++i)
+						_tabs[_frontTab].accessData().addImage(paths[i]);
+				}
+
 				const ActionResult responseEvent = _handleDefaultEvents();
 				if (responseEvent == ActionEvent::WINDOW_CLOSED)
 					return responseEvent;
