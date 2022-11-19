@@ -206,6 +206,7 @@ namespace img
 	class ImageBox
 	{
 		bool _isSelected = false;
+		mutable bool _isOverlapped = false;
 		std::string _nameTag;
 		sf::Image _im;
 		sf::Texture _tx;
@@ -235,10 +236,13 @@ namespace img
 		}
 
 		inline sf::Vector2f getPosition() const { return _sp.getPosition(); }
+		inline sf::FloatRect getBounds() const { return _sp.getGlobalBounds(); }
 		inline std::string getNameTag() const { return _nameTag; }
 		inline bool isSelected() const { return _isSelected; }
+		inline bool isOverlapped() const { return _isOverlapped; }
 
 		inline void setSelect(const bool boolean) { _isSelected = boolean; }
+		inline void setOverlap(const bool boolean) const { _isOverlapped = boolean; }
 		inline void setPosition(const sf::Vector2f& position) { _sp.setPosition(position);}
 		inline void move(const sf::Vector2f& delta) { _sp.move(delta); }
 		inline void setScale(const sf::Vector2f& scale) { _sp.setScale(scale); }
@@ -250,6 +254,31 @@ namespace img
 		inline const sf::Sprite& getDrawObject()
 		{
 			return _sp;
+		}
+
+		inline void draw(sf::RenderWindow& window)
+		{
+			window.draw(_sp);
+			if (_isOverlapped)
+			{
+				sf::FloatRect bounds = _sp.getGlobalBounds();
+				sf::RectangleShape outline(sf::Vector2f(bounds.width, bounds.height));
+				outline.setPosition(bounds.left, bounds.top);
+				outline.setFillColor(sf::Color(255, 0, 0, 75));
+				outline.setOutlineColor(sf::Color(255, 0, 0, 255));
+				outline.setOutlineThickness(-1);
+				window.draw(outline);
+			}
+			if (_isSelected)
+			{
+				sf::FloatRect bounds = _sp.getGlobalBounds();
+				sf::RectangleShape outline(sf::Vector2f(bounds.width, bounds.height));
+				outline.setPosition(bounds.left, bounds.top);
+				outline.setFillColor(sf::Color(255, 255, 255, 75));
+				outline.setOutlineColor(sf::Color(0, 0, 0, 255));
+				outline.setOutlineThickness(1);
+				window.draw(outline);
+			}
 		}
 
 		//help count instances in order to avoid leaks
@@ -275,6 +304,7 @@ namespace img
 
 	class ImageVector
 	{
+		bool _anySelected = false;
 		std::vector<ImageBox*> _images;
 		sf::Vector2f _position;
 		sf::Vector2f _scale;
@@ -316,7 +346,7 @@ namespace img
 		inline void addImage(const std::string& name, const std::string& sourcefile)
 		{
 			_images.push_back(new ImageBox(name, sourcefile));
-			_images.back()->applyScale(_scale);
+			_images.back()->setScale(_scale);
 			if (_images.size() > 1)
 				_images.back()->setPosition(sf::Vector2f(_images[_images.size() - 2]->getPosition() + sf::Vector2f(20.0, 20.0)));
 			else
@@ -332,7 +362,7 @@ namespace img
 		inline void addImage(ImageBox& image)
 		{
 			_images.push_back(&image);
-			_images.back()->applyScale(_scale);
+			_images.back()->setScale(_scale);
 			if (_images.size() > 1)
 				_images.back()->setPosition(_images[_images.size() - 2]->getPosition() + sf::Vector2f(20.0, 20.0));
 			else
@@ -340,59 +370,100 @@ namespace img
 		}
 
 		inline size_t size() const { return _images.size(); }
+		inline bool anySelected() const { return _anySelected; }
 
 		inline void setScale(const sf::Vector2f& scale, const bool selectedOnly = false)
 		{
-			_scale = scale;
+			if(!selectedOnly) _scale = scale;
 			for (size_t i = 0; i < _images.size(); ++i)
 				if (!selectedOnly || _images[i]->isSelected())
 					_images[i]->setScale(scale);
 		}
-		inline void setPosition(const sf::Vector2f& position, const bool selectedOnly = false)
+		inline void setPosition(const sf::Vector2f& position)
 		{
 			const sf::Vector2f delta = position - _position;
 			_position = position;
 			for (size_t i = 0; i < _images.size(); ++i)
+				_images[i]->move(delta);
+		}
+		inline void moveImages(const sf::Vector2f& offset, const bool selectedOnly = false)
+		{
+			for (size_t i = 0; i < _images.size(); ++i)
 				if (!selectedOnly || _images[i]->isSelected())
-					_images[i]->move(delta);
+					_images[i]->move(offset);
 		}
 		inline void applyScale(const sf::Vector2f& scale, const bool selectedOnly = false)
 		{
-			_scale = _scale * scale;
+			if(!selectedOnly) _scale = _scale * scale;
 			for (size_t i = 0; i < _images.size(); ++i)
 				if(!selectedOnly || _images[i]->isSelected())
 					_images[i]->applyScale(scale);
 		}
 
-		void deselectAll()
+		void clearOverlapped() const
 		{
 			for (size_t i = 0; i < _images.size(); ++i)
-				_images[i]->setSelect(false);
+				_images[i]->setOverlap(false);
 		}
-		void select(const sf::Vector2f& coord)
+		void findOverlapped() const
 		{
+			if (_images.size())
+			{
+				clearOverlapped();
+				for (size_t i = 0; i < _images.size() - 1; ++i)
+					for (size_t j = i + 1; j < _images.size(); ++j)
+						if (_images[i]->getBounds().intersects(_images[j]->getBounds()))
+						{
+							_images[i]->setOverlap(true);
+							_images[j]->setOverlap(true);
+						}
+			}
+		}
+		void selectAll()
+		{
+			for (size_t i = 0; i < _images.size(); ++i)
+				_images[i]->setSelect(true);
+			_anySelected = true;
+		}
+		void deselectAll()
+		{
+			if (_anySelected)
+			{
+				for (size_t i = 0; i < _images.size(); ++i)
+					_images[i]->setSelect(false);
+				_anySelected = false;
+			}
+		}
+		bool select(const sf::Vector2f& coord, const bool multiSelect = false)
+		{
+			if(!multiSelect)
+				deselectAll();
 			for(int i = _images.size() - 1; i >= 0; --i)
 				if (_images[i]->contains(coord))
 				{
 					_images[i]->setSelect(true);
-					return;
+					_anySelected = true;
+					return true;
 				}
-				else
-					_images[i]->setSelect(false);
+			return false;
 		}
 		void select(const sf::FloatRect& rect)
 		{
 			for (size_t i = 0; i < _images.size(); ++i)
 				if (_images[i]->intersects(rect))
+				{
 					_images[i]->setSelect(true);
+					_anySelected = true;
+				}
 				else
 					_images[i]->setSelect(false);
 		}
 
-		inline void draw(sf::RenderWindow& window) const 
+		inline void draw(sf::RenderWindow& window, const bool showOverlapped = false) const 
 		{
+			if(showOverlapped) findOverlapped();
 			for (size_t i = 0; i < _images.size(); ++i)
-				window.draw(_images[i]->getDrawObject());
+				_images[i]->draw(window);
 		}
 
 		const ImageBox& operator[](std::size_t idx) const { return *_images[idx]; }
@@ -486,6 +557,7 @@ namespace ui
 
 	class Background
 	{
+	protected:
 		sf::RectangleShape _back;
 
 	public:
@@ -505,6 +577,27 @@ namespace ui
 		{
 			window.draw(_back);
 		}
+	};
+	class SelectedArea : public Background
+	{
+		bool _isInUse = false;
+	public:
+		SelectedArea() :
+			Background(sf::Vector2f(0.0, 0.0), sf::Vector2f(0.0, 0.0), sf::Color(11, 129, 133, 30))
+		{
+			_back.setOutlineThickness(1);
+			_back.setOutlineColor(Defined::DarkCyan);
+		}
+
+		inline void setInUse(const bool boolean) { _isInUse = boolean; }
+		inline void clear() { _back.setSize(sf::Vector2f(0.0, 0.0)); _isInUse = false; }
+		inline void changeEndpoint(const sf::Vector2f& point) { _back.setSize(point - _back.getPosition()); }
+		inline void setSize(const sf::Vector2f& size) { _back.setSize(size); }
+		inline void resizeBy(const sf::Vector2f& size) { _back.setSize(_back.getSize() + size); }
+
+		inline sf::FloatRect getBounds() const { return _back.getGlobalBounds(); }
+		inline bool isInUse() const { return _isInUse; }
+
 	};
 
 	enum TextAlignment
@@ -535,6 +628,20 @@ namespace ui
 		{
 			window.draw(_text);
 		}
+	};
+
+	class DragNDropHelper
+	{
+		bool _isInUse = false;
+		sf::Vector2f _initialPos;
+
+	public:
+		inline void use(const sf::Vector2f& point) { _isInUse = true; _initialPos = point; }
+		inline void clear() { _isInUse = false; }
+		inline void setOrigin(const sf::Vector2f& point) { _initialPos = point; }
+
+		inline bool isInUse() const { return _isInUse; }
+		inline sf::Vector2f getDelta(const sf::Vector2f& point) const { return point - _initialPos; }
 	};
 
 	class Button
@@ -1117,12 +1224,41 @@ namespace ui
 		std::vector<Atlas> _tabs;
 		size_t _frontTab = 0;
 
+		DragNDropHelper _dragger;
 		Background _generalBg, _upBg, _downBg, _leftBg, _rightBg;
 		SelectableTextButton _fileB, _settingsB;
 		Vector<Button> _tabButtons;
 		AtlasOptionsMenu _optionsMenu;
+		SelectedArea _selection;
 
 		os::OpenFileDialog _openFileDialog;
+
+		void _setZoomPrecision(sf::Vector2f& up, sf::Vector2f& down)
+		{
+			if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl))
+			{
+				if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Middle))
+				{
+					up = sf::Vector2f(1.0005, 1.0005);
+					down = sf::Vector2f(0.9995, 0.9995);
+				}
+				else
+				{
+					up = sf::Vector2f(1.001, 1.001);
+					down = sf::Vector2f(0.999, 0.999);
+				}
+			}
+			else if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Middle))
+			{
+				up = sf::Vector2f(1.01, 1.01);
+				down = sf::Vector2f(0.99, 0.99);
+			}
+			else
+			{
+				up = sf::Vector2f(1.1, 1.1);
+				down = sf::Vector2f(0.9, 0.9);
+			}
+		}
 
 		ActionEvent _handleDefaultEvents()
 		{
@@ -1133,7 +1269,9 @@ namespace ui
 				const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
 				if (_optionsMenu.isOpen())
 					if (_optionsMenu.handleEvent(event, mousePos) == ActionEvent::ADD_IMAGE)
+					{
 						_openFileDialog.start();
+					}
 				
 				switch (event.type)
 				{
@@ -1161,9 +1299,20 @@ namespace ui
 						}
 						else _settingsB.setSelected(false);
 
-						_tabs[_frontTab].accessData().select(mousePos);
+						if (_tabs[_frontTab].contains(mousePos))
+						{
+							if (_tabs[_frontTab].accessData().select(mousePos, sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl) || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::RControl)))
+							{
+								_dragger.use(mousePos);
+							}
+							else
+							{
+								_selection.setPosition(mousePos);
+								_selection.setInUse(true);
+							}
+						}	
 					}
-					else
+					else if(sf::Mouse::isButtonPressed(sf::Mouse::Right))
 					{
 						if (_tabs[_frontTab].contains(mousePos))
 							_optionsMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
@@ -1174,12 +1323,38 @@ namespace ui
 				}
 				break;
 
+				case sf::Event::MouseButtonReleased:
+				{
+					if (_selection.isInUse())
+						_selection.clear();
+					else if (_dragger.isInUse())
+						_dragger.clear();
+				}
+				break;
+
+				case sf::Event::MouseMoved:
+				{
+					if (_selection.isInUse())
+					{
+						_selection.changeEndpoint(mousePos);
+						_tabs[_frontTab].accessData().select(_selection.getBounds());
+					}
+					else if (_dragger.isInUse())
+					{
+						_tabs[_frontTab].accessData().moveImages(_dragger.getDelta(mousePos), true);
+						_dragger.setOrigin(mousePos);
+					}
+				}
+				break;
+
 				case sf::Event::MouseWheelMoved:
 				{
-					if(event.mouseWheel.delta > 0)
-						_tabs[_frontTab].accessData().applyScale(sf::Vector2f(1.1, 1.1), true);
+					sf::Vector2f up, down;
+					_setZoomPrecision(up, down);
+					if (event.mouseWheel.delta > 0)
+						_tabs[_frontTab].accessData().applyScale(up, _tabs[_frontTab].accessData().anySelected());
 					else
-						_tabs[_frontTab].accessData().applyScale(sf::Vector2f(0.9, 0.9), true);
+						_tabs[_frontTab].accessData().applyScale(down, _tabs[_frontTab].accessData().anySelected());
 				}
 				break;
 				case sf::Event::Closed:
@@ -1219,6 +1394,8 @@ namespace ui
 			if (_optionsMenu.isOpen())
 				_optionsMenu.draw(_window, mousePos);
 
+			_selection.draw(_window);
+
 			_window.display();
 		}
 
@@ -1246,16 +1423,18 @@ namespace ui
 		{
 			while (_window.isOpen())
 			{
+				const ActionResult responseEvent = _handleDefaultEvents();
+				if (responseEvent == ActionEvent::WINDOW_CLOSED)
+					return responseEvent;
+
 				if (_openFileDialog.isStarted() && _openFileDialog.isReady())
 				{
 					std::vector<std::string> paths = util::separatePaths(util::toString(_openFileDialog.getPath()));
 					for (int i = 0; i < paths.size(); ++i)
 						_tabs[_frontTab].accessData().addImage(paths[i]);
+					_selection.clear();
+					_tabs[_frontTab].accessData().deselectAll();
 				}
-
-				const ActionResult responseEvent = _handleDefaultEvents();
-				if (responseEvent == ActionEvent::WINDOW_CLOSED)
-					return responseEvent;
 
 				_displayEditor();
 			}
