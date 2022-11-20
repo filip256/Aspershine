@@ -7,6 +7,7 @@
 #include <atomic>
 #include <locale>
 #include <codecvt>
+#include <list>
 
 #define FILE_MAX_PATH 4096
 #define VERSION "0.0.1"
@@ -86,6 +87,23 @@ namespace util
 		}
 		return result;
 	}
+
+	template<class T, size_t N> 
+	class MaxStack
+	{
+		// maybe use vector and allow the limit to be surpassed by a value before delete happens
+		std::list<T> _content;
+
+	public:
+		inline void push(const T& item) 
+		{ 
+			if (_content.size() == N)
+				_content.pop_front();
+			_content.push_back(item); 
+		}
+		inline void pop() { _content.pop_back(); }
+		inline void top() { _content.back(); }
+	};
 }
 
 
@@ -201,6 +219,17 @@ namespace os
 
 namespace img
 {
+	enum RevertAction
+	{
+
+	};
+	typename std::pair<const RevertAction, void*> Revertable;
+
+	class UndoHelper
+	{
+
+	};
+
 	sf::Vector2f operator* (const sf::Vector2f first, const sf::Vector2f second) { return sf::Vector2f(first.x * second.x, first.y * second.y); }
 
 	class ImageBox
@@ -352,13 +381,11 @@ namespace img
 			else
 				_images.back()->setPosition(_position);
 		}
-
 		inline void addImage(const std::string& sourcefile)
 		{
 			const std::string aux = sourcefile.substr(sourcefile.rfind('\\') + 1);
 			addImage(aux.substr(0, aux.rfind('.')), sourcefile);
 		}
-
 		inline void addImage(ImageBox& image)
 		{
 			_images.push_back(&image);
@@ -369,8 +396,30 @@ namespace img
 				_images.back()->setPosition(_position);
 		}
 
+		inline void deleteImage(const size_t idx)
+		{
+			delete _images[idx];
+			_images.erase(_images.begin() + idx);
+		}
+		void deleteImages(const bool selectedOnly = false)
+		{
+			for (size_t i = 0; i < _images.size(); ++i)
+				if (!selectedOnly || _images[i]->isSelected())
+				{
+					deleteImage(i);
+					--i;
+				}
+		}
+
 		inline size_t size() const { return _images.size(); }
 		inline bool anySelected() const { return _anySelected; }
+		bool anyContains(const sf::Vector2f& point)
+		{
+			for (size_t i = 0; i < _images.size(); ++i)
+				if (_images[i]->contains(point))
+					return true;
+			return false;
+		}
 
 		inline void setScale(const sf::Vector2f& scale, const bool selectedOnly = false)
 		{
@@ -458,6 +507,13 @@ namespace img
 				else
 					_images[i]->setSelect(false);
 		}
+		int findImage(const sf::Vector2f& point)
+		{
+			for (int i = _images.size() - 1; i >= 0; --i)
+				if (_images[i]->contains(point))
+					return i;
+			return -1;
+		}
 
 		inline void draw(sf::RenderWindow& window, const bool showOverlapped = false) const 
 		{
@@ -496,6 +552,7 @@ namespace ui
 		static sf::Text DefaultText;
 
 		static const sf::Color DarkGrey;
+		static const sf::Color RedDarkGrey;
 		static const sf::Color Grey;
 		static const sf::Color DarkCyan;
 
@@ -515,6 +572,7 @@ namespace ui
 	sf::Font Defined::DefaultFont;
 	sf::Text Defined::DefaultText;
 	const sf::Color Defined::DarkGrey = sf::Color(20, 20, 20, 255);
+	const sf::Color Defined::RedDarkGrey = sf::Color(80, 20, 20, 255);
 	const sf::Color Defined::Grey = sf::Color(50, 50, 50, 255);
 	const sf::Color Defined::DarkCyan = sf::Color(11, 129, 133, 255);
 
@@ -539,6 +597,9 @@ namespace ui
 		TICKBOX_MODIFIED_3,
 
 		ADD_IMAGE,
+		DELETE_IMAGE,
+		DELETE_ALL,
+		SELECT_ALL,
 
 		CONTINUE_1
 	};
@@ -552,6 +613,8 @@ namespace ui
 			eventTag(event),
 			obj(object)
 		{}
+
+		inline ActionEvent getActionEvent() const { return eventTag; }
 	};
 	inline bool operator==(const ActionResult& lhs, const ActionResult& rhs) { return lhs.eventTag == rhs.eventTag; }
 
@@ -680,6 +743,9 @@ namespace ui
 			_back.setOutlineColor(sf::Color(fillColor.r + 100, fillColor.g + 100, fillColor.b + 100, fillColor.a));
 		}
 
+		inline sf::Vector2f getPosition() const { return _back.getPosition(); }
+		inline sf::Vector2f getSize() const { return _back.getSize(); }
+
 		inline virtual void setPosition(const sf::Vector2f& position)
 		{
 			_back.setPosition(position);
@@ -693,6 +759,15 @@ namespace ui
 		{
 			_checkHovering(point);
 			window.draw(_back);
+		}
+
+		static inline sf::Vector2f below(const Button& object)
+		{
+			return sf::Vector2f(object.getPosition().x, object.getPosition().y + object.getSize().y + 1.0);
+		}
+		static inline sf::Vector2f after(const Button& object)
+		{
+			return sf::Vector2f(object.getPosition().x + object.getSize().x + 1.0, object.getPosition().y);
 		}
 	};
 	class TickBox : public Button
@@ -1124,37 +1199,60 @@ namespace ui
 		}
 	};
 
-	class AtlasOptionsMenu
+	class OptionsMenu
 	{
 		bool _isOpen = false;
+
+	protected:
 		Background _back;
-		TextButton _addImageB;
 
 	public:
-		AtlasOptionsMenu() :
-			_back(sf::Vector2f(100.0, 20.0), sf::Vector2f(0.0, 0.0), Defined::Grey),
-			_addImageB(sf::Vector2f(100.0, 20.0), sf::Vector2f(0.0, 0.0), 14, "Add Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey)
+		OptionsMenu() :
+			_back(sf::Vector2f(100.0, 20.0), sf::Vector2f(0.0, 0.0), Defined::Grey)
 		{}
 
-		inline void open(const sf::Vector2f& position) 
-		{ 
+		inline void open(const sf::Vector2f& position)
+		{
 			_isOpen = true;
 			setPosition(position);
 		}
 		inline void close() { _isOpen = false; }
 		inline bool isOpen() const { return _isOpen; }
 
-		void setPosition(const sf::Vector2f& position)
+		virtual void setPosition(const sf::Vector2f& position) = 0;
+	};
+	class AtlasOptionsMenu : public OptionsMenu
+	{
+		TextButton _addImageB, _selectAllB, _deleteAllB;
+
+
+	public:
+		AtlasOptionsMenu() :
+			OptionsMenu(),
+			_addImageB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Add Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey),
+			_selectAllB(sf::Vector2f(100.0, 24.0), Button::below(_addImageB), 14, "Select All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey),
+			_deleteAllB(sf::Vector2f(100.0, 24.0), Button::below(_selectAllB), 14, "Delete All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::RedDarkGrey)
+		{}
+
+		void setPosition(const sf::Vector2f& position) override
 		{
 			_back.setPosition(position);
 			_addImageB.setPosition(position);
+			_selectAllB.setPosition(Button::below(_addImageB));
+			_deleteAllB.setPosition(Button::below(_selectAllB));
 		}
 
 		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
 			if (event.type == sf::Event::MouseButtonPressed)
+			{
 				if (_addImageB.contains(mousePosition))
 					return ActionEvent::ADD_IMAGE;
+				else if (_selectAllB.contains(mousePosition))
+					return ActionEvent::SELECT_ALL;
+				else if (_deleteAllB.contains(mousePosition))
+					return ActionEvent::DELETE_ALL;
+			}
 			return ActionEvent::NONE;
 		}
 
@@ -1162,6 +1260,41 @@ namespace ui
 		{
 			_back.draw(window);
 			_addImageB.draw(window, point);
+			_selectAllB.draw(window, point);
+			_deleteAllB.draw(window, point);
+		}
+	};
+	class ImageOptionsMenu : public OptionsMenu
+	{
+		TextButton _deleteB;
+
+
+	public:
+		ImageOptionsMenu() :
+			OptionsMenu(),
+			_deleteB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Delete", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::RedDarkGrey)
+		{}
+
+		void setPosition(const sf::Vector2f& position) override
+		{
+			_back.setPosition(position);
+			_deleteB.setPosition(position);
+		}
+
+		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		{
+			if (event.type == sf::Event::MouseButtonPressed)
+			{
+				if (_deleteB.contains(mousePosition))
+					return ActionEvent::DELETE_IMAGE;
+			}
+			return ActionEvent::NONE;
+		}
+
+		void draw(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			_back.draw(window);
+			_deleteB.draw(window, point);
 		}
 	};
 
@@ -1174,7 +1307,7 @@ namespace ui
 	public:
 		Atlas(const std::string& name = "New Atlas") :
 			_name(name),
-			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), sf::Color(200, 200, 200, 255))
+			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), sf::Color(100, 100, 100, 255))
 		{
 			_images.setPosition(sf::Vector2f(10.0, 74.0));
 		}
@@ -1205,10 +1338,10 @@ namespace ui
 
 		inline bool contains(const sf::Vector2f& point) const { return _back.contains(point); }
 
-		inline void draw(sf::RenderWindow& window) const
+		inline void draw(sf::RenderWindow& window, const bool showOverlapped = false) const
 		{
 			_back.draw(window);
-			_images.draw(window);
+			_images.draw(window, showOverlapped);
 		}
 
 		static Atlas loadFromFile(std::wstring path)
@@ -1226,9 +1359,10 @@ namespace ui
 
 		DragNDropHelper _dragger;
 		Background _generalBg, _upBg, _downBg, _leftBg, _rightBg;
-		SelectableTextButton _fileB, _settingsB;
+		SelectableTextButton _fileB, _viewB, _settingsB;
 		Vector<Button> _tabButtons;
 		AtlasOptionsMenu _optionsMenu;
+		ImageOptionsMenu _imageMenu;
 		SelectedArea _selection;
 
 		os::OpenFileDialog _openFileDialog;
@@ -1267,11 +1401,25 @@ namespace ui
 			while (_window.pollEvent(event))
 			{
 				const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
+				ActionEvent optionsResult = ActionEvent::NONE;
 				if (_optionsMenu.isOpen())
-					if (_optionsMenu.handleEvent(event, mousePos) == ActionEvent::ADD_IMAGE)
-					{
+				{
+					optionsResult = _optionsMenu.handleEvent(event, mousePos).getActionEvent();
+					if (optionsResult == ActionEvent::ADD_IMAGE)
 						_openFileDialog.start();
+					else if (optionsResult == ActionEvent::SELECT_ALL)
+						_tabs[_frontTab].accessData().selectAll();
+					else if (optionsResult == ActionEvent::DELETE_ALL)
+						_tabs[_frontTab].accessData().deleteImages(true);
+				}
+				else if (_imageMenu.isOpen())
+				{
+					optionsResult = _imageMenu.handleEvent(event, mousePos).getActionEvent();
+					if (optionsResult == ActionEvent::DELETE_IMAGE)
+					{
+						_tabs[_frontTab].accessData().deleteImages(true);
 					}
+				}
 				
 				switch (event.type)
 				{
@@ -1280,6 +1428,7 @@ namespace ui
 					if (sf::Mouse::isButtonPressed(sf::Mouse::Left))
 					{
 						_optionsMenu.close();
+						_imageMenu.close();
 						//click buttons
 						const Button* button = _tabButtons.contains(mousePos);
 						if (button)
@@ -1293,33 +1442,58 @@ namespace ui
 						}
 						else _fileB.setSelected(false);
 
+						if (_viewB.contains(mousePos))
+						{
+							_viewB.setSelected(!_viewB.isSelected());
+							if (!_viewB.isSelected())
+								_tabs[_frontTab].accessData().clearOverlapped();
+						}
+						//else _viewB.setSelected(false);
+
 						if (_settingsB.contains(mousePos))
 						{
 							_settingsB.setSelected(true);
 						}
 						else _settingsB.setSelected(false);
 
-						if (_tabs[_frontTab].contains(mousePos))
+						if (optionsResult != ActionEvent::SELECT_ALL && optionsResult != ActionEvent::DELETE_IMAGE)
 						{
-							if (_tabs[_frontTab].accessData().select(mousePos, sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl) || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::RControl)))
+							if (_tabs[_frontTab].contains(mousePos))
 							{
-								_dragger.use(mousePos);
+								if (_tabs[_frontTab].accessData().select(mousePos, sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl) || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::RControl)))
+								{
+									_dragger.use(mousePos);
+								}
+								else
+								{
+									_selection.setPosition(mousePos);
+									_selection.setInUse(true);
+								}
 							}
-							else
-							{
-								_selection.setPosition(mousePos);
-								_selection.setInUse(true);
-							}
-						}	
+						}
 					}
 					else if(sf::Mouse::isButtonPressed(sf::Mouse::Right))
 					{
 						if (_tabs[_frontTab].contains(mousePos))
-							_optionsMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
+						{
+							if (_tabs[_frontTab].accessData().anyContains(mousePos))
+							{
+								_imageMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
+								_tabs[_frontTab].accessData().select(mousePos);
+								_optionsMenu.close();
+							}
+							else
+							{
+								_optionsMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
+								_imageMenu.close();
+							}
+						}
 						else
+						{
 							_optionsMenu.close();
+							_imageMenu.close();
+						}
 					}
-
 				}
 				break;
 
@@ -1379,7 +1553,7 @@ namespace ui
 
 			//_generalBg.draw(_window);
 
-			_tabs[_frontTab].draw(_window);
+			_tabs[_frontTab].draw(_window, _viewB.isSelected());
 
 			_upBg.draw(_window);
 			_leftBg.draw(_window);
@@ -1387,12 +1561,16 @@ namespace ui
 			_rightBg.draw(_window);
 
 			_fileB.draw(_window, mousePos);
+			_viewB.draw(_window, mousePos);
 			_settingsB.draw(_window, mousePos);
 
 			_tabButtons.drawAll(_window, mousePos);
 
 			if (_optionsMenu.isOpen())
 				_optionsMenu.draw(_window, mousePos);
+
+			if (_imageMenu.isOpen())
+				_imageMenu.draw(_window, mousePos);
 
 			_selection.draw(_window);
 
@@ -1408,7 +1586,8 @@ namespace ui
 			_downBg(sf::Vector2f(window.getSize().x, 25.0), sf::Vector2f(0.0, 775.0), Defined::DarkGrey),
 			_rightBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(1190.0, 0.0), Defined::DarkGrey),
 			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_settingsB(sf::Vector2f(90.0, 24.0), sf::Vector2f(50.0, 0.0), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
+			_viewB(sf::Vector2f(50.0, 24.0), Button::after(_fileB), 14, "View", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
+			_settingsB(sf::Vector2f(90.0, 24.0), Button::after(_viewB), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
 			_openFileDialog(window.getSystemHandle(), L"All files\0*.*\0", nullptr, true)
 		{}
 
@@ -1431,7 +1610,8 @@ namespace ui
 				{
 					std::vector<std::string> paths = util::separatePaths(util::toString(_openFileDialog.getPath()));
 					for (int i = 0; i < paths.size(); ++i)
-						_tabs[_frontTab].accessData().addImage(paths[i]);
+						if(paths[i].size())
+							_tabs[_frontTab].accessData().addImage(paths[i]);
 					_selection.clear();
 					_tabs[_frontTab].accessData().deselectAll();
 				}
