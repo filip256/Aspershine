@@ -8,6 +8,7 @@
 #include <locale>
 #include <codecvt>
 #include <list>
+#include <shlobj_core.h>
 
 #define FILE_MAX_PATH 4096
 #define VERSION "0.0.1"
@@ -89,20 +90,34 @@ namespace util
 	}
 
 	template<class T, size_t N> 
-	class MaxStack
+	class UndoStack
 	{
 		// maybe use vector and allow the limit to be surpassed by a value before delete happens
-		std::list<T> _content;
+		std::vector<T> _content;
+		size_t _idx = 0;
 
 	public:
+		UndoStack()
+		{
+			_content.reserve(N + MAX_OVER);
+		}
+
 		inline void push(const T& item) 
 		{ 
-			if (_content.size() == N)
-				_content.pop_front();
+			if (_content.size() == N + MAX_OVER)
+				_content.erase(_content.begin(), _content.begin() + MAX_OVER);
 			_content.push_back(item); 
 		}
-		inline void pop() { _content.pop_back(); }
-		inline void top() { _content.back(); }
+		inline void pop()
+		{ 
+			if (_idx == _content.size() - 1)
+				--_idx;
+			_content.pop_back(); 	
+		}
+		inline T& top() { return _content.back(); }
+		inline T& getCurrent() { return _content[_idx--]; }
+
+		static const size_t MAX_OVER = 10;
 	};
 }
 
@@ -129,7 +144,7 @@ namespace os
 			_ofn.hwndOwner = hwnd;
 			_ofn.lpstrTitle = L"Open Atlas";
 			_ofn.lpstrFilter = filter;
-			_ofn.lpstrDefExt = L".txt";
+			_ofn.lpstrDefExt = L"txt";
 			_ofn.lpstrFile = _path;
 			_ofn.nMaxFile = FILE_MAX_PATH;
 			if (allowMultiple) _ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST;
@@ -159,6 +174,52 @@ namespace os
 			}
 
 			return util::replaceWithEndl(_path);
+		}
+	};
+	class SaveFileDialog
+	{
+		std::atomic<bool> _ready;
+		wchar_t _path[FILE_MAX_PATH] = { 0 };
+		std::thread *_thr = nullptr;
+		BROWSEINFO _bi;
+
+		static void _kern(BROWSEINFO *bi, std::atomic<bool>* ready, wchar_t* path)
+		{
+			SHGetPathFromIDList(SHBrowseForFolder(bi), path);
+			*ready = true;
+		}
+
+	public:
+		SaveFileDialog(const HWND& hwnd)
+		{
+			_bi.hwndOwner = hwnd;
+			_bi.lpszTitle = L"Save Atlas";
+			_bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+		}
+
+		void start()
+		{
+			if (!_thr)
+			{
+				memset(_path, 0, FILE_MAX_PATH);
+				_ready = false;
+				_thr = new std::thread(_kern, &_bi, &_ready, _path);
+			}
+		}
+
+		bool isReady() const { return _ready.load(); }
+		bool isStarted() const { return _thr != nullptr; }
+
+		std::wstring getPath()
+		{
+			if (_thr)
+			{
+				_thr->join();
+				delete _thr;
+				_thr = nullptr;
+			}
+
+			return _path;
 		}
 	};
 	class SystemData
@@ -215,6 +276,27 @@ namespace os
 		}
 	};
 	const HWND SystemData::hwnd = GetConsoleWindow();
+
+	bool directoryExists(LPCTSTR szPath)
+	{
+		DWORD dwAttrib = GetFileAttributes(szPath);
+
+		return (dwAttrib != INVALID_FILE_ATTRIBUTES &&
+			(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+	}
+
+	std::wstring getAvailableDir(std::wstring path)
+	{
+		unsigned short int cnt = 1;
+		std::wstring copyTemp = path;
+		while (directoryExists(path.c_str()))
+		{
+			path = copyTemp + L'(' + std::to_wstring(cnt) + L')';
+			++cnt;
+		}
+		return path;
+	}
+
 }
 
 namespace img
@@ -232,17 +314,32 @@ namespace img
 
 	sf::Vector2f operator* (const sf::Vector2f first, const sf::Vector2f second) { return sf::Vector2f(first.x * second.x, first.y * second.y); }
 
+	class ImageBoxData
+	{
+	public:
+		std::string nameTag;
+		sf::Vector2f position, scale;
+		bool isValid = false;
+
+		ImageBoxData()
+		{}
+
+		ImageBoxData(const std::string& nameTag, const sf::Vector2f& position, const sf::Vector2f& scale) :
+			nameTag(nameTag),
+			position(position),
+			scale(scale)
+		{}
+	};
+
 	class ImageBox
 	{
 		bool _isSelected = false;
 		mutable bool _isOverlapped = false;
 		std::string _nameTag;
-		sf::Image _im;
 		sf::Texture _tx;
 		sf::Sprite _sp;
 
 	public:
-
 		ImageBox(const std::string& nameTag, const std::string& sourcefile = "") :
 			_nameTag(nameTag)
 		{
@@ -250,17 +347,22 @@ namespace img
 		}
 
 		ImageBox(const ImageBox& other) :
-			_im(other._im),
 			_tx(other._tx),
 			_sp(_tx)
 		{}
 
+		ImageBox(const ImageBoxData& data, const std::string& imageDir) :
+			_nameTag(data.nameTag)
+		{
+			setImage(imageDir + "\\" + _nameTag + ".png");
+			_sp.setPosition(data.position);
+			_sp.setScale(data.scale);
+		}
+
 		void setImage(const std::string& sourcefile)
 		{
-			if (sourcefile.length() == 0 || !_im.loadFromFile(sourcefile))
-				_im.loadFromFile("iconsc.png");
-			_tx.create(_im.getSize().x, _im.getSize().y);
-			_tx.update(_im);
+			if (sourcefile.length() == 0 || !_tx.loadFromFile(sourcefile))
+				_tx.loadFromFile("iconsc.png");
 			_sp.setTexture(_tx);
 		}
 
@@ -285,7 +387,7 @@ namespace img
 			return _sp;
 		}
 
-		inline void draw(sf::RenderWindow& window)
+		void draw(sf::RenderWindow& window)
 		{
 			window.draw(_sp);
 			if (_isOverlapped)
@@ -310,6 +412,52 @@ namespace img
 			}
 		}
 
+		std::string serialize() const
+		{
+			return _nameTag + ':'
+				+ std::to_string(_sp.getPosition().x) + ':'
+				+ std::to_string(_sp.getPosition().y) + ':'
+				+ std::to_string(_sp.getScale().x) + ':'
+				+ std::to_string(_sp.getScale().y);
+		}
+		void saveToFile(const std::string& path) const
+		{
+			_tx.copyToImage().saveToFile(path + "\\" + _nameTag + ".png");
+		}
+
+		static ImageBoxData deserialize(const std::string& line)
+		{
+			ImageBoxData data;
+
+			try
+			{
+				size_t last, next = line.find(':');
+				data.nameTag = line.substr(0, next);
+				last = next;
+
+				next = line.find(':', last + 1);
+				data.position.x = std::stof(line.substr(last + 1, next));
+				last = next;
+
+				next = line.find(':', last + 1);
+				data.position.y = std::stof(line.substr(last + 1, next));
+				last = next;
+
+				next = line.find(':', last + 1);
+				data.scale.x = std::stof(line.substr(last + 1, next));
+				last = next;
+
+				data.scale.y = std::stof(line.substr(last + 1));
+			}
+			catch (...)
+			{
+				return data;
+			}
+
+			data.isValid = true;
+			return data;
+		}
+
 		//help count instances in order to avoid leaks
 		void* operator new(const std::size_t count)
 		{
@@ -327,7 +475,7 @@ namespace img
 	size_t ImageBox::instanceCount = 0;
 	std::ostream& operator<<(std::ostream& os, const ImageBox& obj)
 	{
-		os << "{\n" << obj.getNameTag() << "},\n";
+		os << obj.serialize();
 		return os;
 	}
 
@@ -357,6 +505,17 @@ namespace img
 			_scale(other._scale)
 		{
 			mergeWith(std::move(other));
+		}
+
+		ImageVector(std::ifstream& fileIn, const std::string& imageDir)
+		{
+			std::string line;
+			while (getline(fileIn, line))
+			{
+				ImageBoxData data = ImageBox::deserialize(line);
+				if(data.isValid)
+					_images.push_back(new ImageBox(data, imageDir));
+			}
 		}
 
 		~ImageVector()
@@ -523,13 +682,18 @@ namespace img
 		}
 
 		const ImageBox& operator[](std::size_t idx) const { return *_images[idx]; }
+
+		void saveToFile(const std::string& path) const
+		{
+			CreateDirectoryA(path.c_str(), NULL);
+			for (size_t i = 0; i < _images.size(); ++i)
+				_images[i]->saveToFile(path);
+		}
 	};
 	std::ostream& operator<<(std::ostream& os, const ImageVector& obj)
 	{
-		os << "[\n";
 		for (size_t i = 0; i < obj.size(); ++i)
 			os << obj[i] << '\n';
-		os << "]\n";
 		return os;
 	}
 }
@@ -1316,26 +1480,6 @@ namespace ui
 
 		inline std::string getName() const { return _name; }
 
-		bool dumpToFile(std::wstring path)
-		{
-			unsigned short int cnt = 1;
-			std::wstring temp = path, copyTemp = temp;
-			while (PathIsDirectory(temp.c_str()))
-			{
-				temp = copyTemp + L'(' + std::to_wstring(cnt) + L')';
-				++cnt;
-			}
-
-			std::ofstream out(temp);
-			if (out.bad())
-				return false;
-
-			out << VERSION << '\n' << _name << '\n' << _images;
-			out.close();
-
-			return true;
-		}
-
 		inline bool contains(const sf::Vector2f& point) const { return _back.contains(point); }
 
 		inline void draw(sf::RenderWindow& window, const bool showOverlapped = false) const
@@ -1344,9 +1488,29 @@ namespace ui
 			_images.draw(window, showOverlapped);
 		}
 
-		static Atlas loadFromFile(std::wstring path)
+		void saveToFile(const std::string& path, const bool allowOverwrite) const
 		{
-			return Atlas("New loaded atlas");
+			std::string temp;
+			if (allowOverwrite)
+				temp = path + "\\" + _name;
+			else
+				temp = util::toString(os::getAvailableDir(util::toWide(path + "\\" + _name)));
+
+			CreateDirectoryA(temp.c_str(), NULL);
+			std::ofstream out(temp + "\\" + _name + ".atl");
+			if (!out)
+				return;
+
+			out << VERSION<< '\n' << _name << '\n' << _images;
+			out.close();
+
+			_images.saveToFile(temp + "\\" + _name + "_img");
+		}
+
+		static Atlas loadFromFile(const std::string& filepath)
+		{
+			std::ifstream in(filepath)
+			Atlas newAtlas;
 		}
 	};
 
@@ -1366,8 +1530,9 @@ namespace ui
 		SelectedArea _selection;
 
 		os::OpenFileDialog _openFileDialog;
+		os::SaveFileDialog _saveFileDialog;
 
-		void _setZoomPrecision(sf::Vector2f& up, sf::Vector2f& down)
+		inline void _setZoomPrecision(sf::Vector2f& up, sf::Vector2f& down)
 		{
 			if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl))
 			{
@@ -1453,6 +1618,7 @@ namespace ui
 						if (_settingsB.contains(mousePos))
 						{
 							_settingsB.setSelected(true);
+							_saveFileDialog.start();
 						}
 						else _settingsB.setSelected(false);
 
@@ -1588,7 +1754,8 @@ namespace ui
 			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
 			_viewB(sf::Vector2f(50.0, 24.0), Button::after(_fileB), 14, "View", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
 			_settingsB(sf::Vector2f(90.0, 24.0), Button::after(_viewB), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_openFileDialog(window.getSystemHandle(), L"All files\0*.*\0", nullptr, true)
+			_openFileDialog(window.getSystemHandle(), L"All files\0*.*\0", nullptr, true),
+			_saveFileDialog(window.getSystemHandle())
 		{}
 
 		void addAtlas(const Atlas& atlas)
@@ -1614,6 +1781,11 @@ namespace ui
 							_tabs[_frontTab].accessData().addImage(paths[i]);
 					_selection.clear();
 					_tabs[_frontTab].accessData().deselectAll();
+				}
+				if (_saveFileDialog.isStarted() && _saveFileDialog.isReady())
+				{
+					if (_saveFileDialog.getPath().size())
+						_tabs[_frontTab].saveToFile(util::toString(_saveFileDialog.getPath()), true);
 				}
 
 				_displayEditor();
