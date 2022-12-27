@@ -9,6 +9,7 @@
 #include <codecvt>
 #include <list>
 #include <shlobj_core.h>
+#include "pack.h"
 
 #define FILE_MAX_PATH 4096
 #define VERSION "0.0.1"
@@ -121,8 +122,6 @@ namespace util
 	};
 }
 
-
-
 namespace os
 {
 	class OpenFileDialog
@@ -142,9 +141,9 @@ namespace os
 		OpenFileDialog(const HWND& hwnd, const wchar_t *filter = L"All files\0*.*\0", const wchar_t *defaultExtension = nullptr, const bool allowMultiple = false)
 		{
 			_ofn.hwndOwner = hwnd;
-			_ofn.lpstrTitle = L"Open Atlas";
+			_ofn.lpstrTitle = L"Open";
 			_ofn.lpstrFilter = filter;
-			_ofn.lpstrDefExt = L"txt";
+			//_ofn.lpstrDefExt = L"txt";
 			_ofn.lpstrFile = _path;
 			_ofn.nMaxFile = FILE_MAX_PATH;
 			if (allowMultiple) _ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST;
@@ -443,6 +442,9 @@ namespace img
 		}
 
 		inline sf::Vector2f getPosition() const { return _sp.getPosition(); }
+		inline sf::Vector2f getSize() const { return static_cast<sf::Vector2f>(_tx.getSize()); }
+		inline sf::Vector2f getScaledSize() const { return sf::Vector2f(_sp.getGlobalBounds().width, _sp.getGlobalBounds().height); }
+		inline sf::Vector2f getScale() const { return _sp.getScale(); }
 		inline sf::FloatRect getBounds() const { return _sp.getGlobalBounds(); }
 		inline std::string getNameTag() const { return _nameTag; }
 		inline bool isSelected() const { return _isSelected; }
@@ -608,7 +610,7 @@ namespace img
 			_scale(other._scale)
 		{
 			for (size_t i = 0; i < other._images.size(); ++i)
-				addImage(*new ImageBox(*other._images[i]));
+				addImage(*new ImageBox(*other._images[i]), i == 0);
 		}
 
 		ImageVector(ImageVector&& other) :
@@ -627,33 +629,33 @@ namespace img
 		inline void mergeWith(ImageVector&& other)
 		{
 			for (size_t i = 0; i < other._images.size(); ++i)
-				addImage(*other._images[i], false);
+				addImage(*other._images[i], i == 0, false);
 			other._images.clear();
 		}
 
-		inline void addImage(const std::string& name, const std::string& sourcefile, const bool resetProperties = true)
+		inline void addImage(const std::string& name, const std::string& sourcefile, const bool resetPosition, const bool resetProperties = true)
 		{
 			_images.push_back(new ImageBox(name, sourcefile));
 
 			if (resetProperties)
 			{
 				_images.back()->setScale(_scale);
-				if (_images.size() > 1)
+				if (_images.size() > 1 && !resetPosition)
 					_images.back()->setPosition(sf::Vector2f(_images[_images.size() - 2]->getPosition() + sf::Vector2f(20.0, 20.0)));
 				else
 					_images.back()->setPosition(_position);
 			}
 		}
-		inline void addImage(const std::string& sourcefile)
+		inline void addImage(const std::string& sourcefile, const bool resetPosition)
 		{
 			const std::string aux = sourcefile.substr(sourcefile.rfind('\\') + 1);
-			addImage(aux.substr(0, aux.rfind('.')), sourcefile);
+			addImage(aux.substr(0, aux.rfind('.')), sourcefile, resetPosition);
 		}
-		inline void addImage(ImageBox& image, const bool resetProperties = true)
+		inline void addImage(ImageBox& image, const bool resetPosition, const bool resetProperties = true)
 		{
 			_images.push_back(&image);
 
-			if (resetProperties)
+			if (resetProperties && !resetPosition)
 			{
 				_images.back()->setScale(_scale);
 				if (_images.size() > 1)
@@ -679,6 +681,22 @@ namespace img
 		}
 
 		inline sf::Vector2f getScale() const { return _scale; }
+		inline sf::Vector2f getPosition() const { return _position; }
+		const ImageBox* getSingleSelected()
+		{
+			if (!_anySelected)
+				return nullptr;
+
+			ImageBox* temp = nullptr;
+			for (size_t i = 0; i < _images.size(); ++i)
+				if (_images[i]->isSelected())
+				{
+					if (temp)
+						return nullptr;
+					temp = _images[i];
+				}
+			return temp;
+		}
 		inline size_t size() const { return _images.size(); }
 		inline bool anySelected() const { return _anySelected; }
 		bool anyContains(const sf::Vector2f& point)
@@ -702,6 +720,11 @@ namespace img
 			_position = position;
 			for (size_t i = 0; i < _images.size(); ++i)
 				_images[i]->move(delta);
+		}
+		inline void applyBasePosition()
+		{
+			for (size_t i = 0; i < _images.size(); ++i)
+				_images[i]->setPosition(_images[i]->getPosition() + _position);
 		}
 		inline void moveImages(const sf::Vector2f& offset, const bool selectedOnly = false)
 		{
@@ -790,6 +813,7 @@ namespace img
 				_images[i]->draw(window);
 		}
 
+		ImageBox& operator[](std::size_t idx) { return *_images[idx]; }
 		const ImageBox& operator[](std::size_t idx) const { return *_images[idx]; }
 
 		bool exportToImage(const std::string& path) const
@@ -834,6 +858,15 @@ namespace img
 				}
 			}
 		}
+
+		ImageVector& operator=(const ImageVector& other) 
+		{
+			_anySelected = other._anySelected;
+			_images = other._images;
+			_position = other._position;
+			_scale = other._scale;
+			return *this;
+		}
 	};
 	std::ostream& operator<<(std::ostream& os, const ImageVector& obj)
 	{
@@ -841,6 +874,91 @@ namespace img
 			os << obj[i].serialize(obj.getScale()) << '\n';
 		return os;
 	}
+}
+
+namespace pk
+{
+	class Rect : public rect_xywhf
+	{
+		img::ImageBox& const imgBox;
+		
+
+	public:
+		Rect(img::ImageBox& imageBox)
+			:
+			imgBox(imageBox)
+		{
+			sf::FloatRect temp = imgBox.getBounds();
+			this->x = temp.left;
+			this->y = temp.top;
+			this->w = temp.width + 5;
+			this->h = temp.height + 5;
+		}
+
+
+
+		void apply()
+		{
+			imgBox.setPosition(sf::Vector2f(this->x, this->y));
+		}
+	};
+	class Packer
+	{
+		bool allowFlips;
+		int max_w, max_h;
+		std::vector<Rect> rects;
+
+	public:
+		Packer(const sf::Vector2i& maxSize, const bool allowRotation = false)
+			:
+			allowFlips(allowRotation),
+			max_w(maxSize.x),
+			max_h(maxSize.y)
+		{
+
+		}
+
+		void loadRects(img::ImageVector& images)
+		{
+			rects.clear();
+
+			for (size_t i = 0; i < images.size(); ++i)
+				rects.emplace_back(Rect(images[i]));
+		}
+		bool packImages()
+		{
+			std::vector<rect_xywhf*> recPtr;
+
+			for (size_t i = 0; i < rects.size(); ++i) {
+				recPtr.push_back(&rects[i]);
+			}
+
+			std::vector<bin> bins;
+
+			if (pack(&recPtr[0], recPtr.size(), max_w, max_h, false, bins)) {
+				printf("bins: %d\n", bins.size());
+
+				for (int i = 0; i < bins.size(); ++i) {
+					printf("\n\nbin: %dx%d, rects: %d\n", bins[i].size.w, bins[i].size.h, bins[i].rects.size());
+
+					for (int r = 0; r < bins[i].rects.size(); ++r) {
+						rect_xywhf* rect = bins[i].rects[r];
+
+						printf("rect %d: x: %d, y: %d, w: %d, h: %d, was flipped: %s\n", r, rect->x, rect->y, rect->w, rect->h, rect->flipped ? "yes" : " no");
+					}
+				}
+			}
+			else {
+				printf("failed: there's a rectangle with width/height bigger than max_size!\n");
+			}
+			return true;
+		}
+		void applyChanges()
+		{
+			for (size_t i = 0; i < rects.size(); ++i)
+				rects[i].apply();
+		}
+	};
 }
 
 namespace ui
@@ -937,6 +1055,8 @@ namespace ui
 		static const sf::Color DarkGrey;
 		static const sf::Color RedDarkGrey;
 		static const sf::Color Grey;
+		static const sf::Color MediumLightGrey;
+		static const sf::Color LightGrey;
 		static const sf::Color DarkCyan;
 
 
@@ -961,6 +1081,8 @@ namespace ui
 	const sf::Color Defined::DarkGrey = sf::Color(20, 20, 20, 255);
 	const sf::Color Defined::RedDarkGrey = sf::Color(80, 20, 20, 255);
 	const sf::Color Defined::Grey = sf::Color(50, 50, 50, 255);
+	const sf::Color Defined::MediumLightGrey = sf::Color(100, 100, 100, 255);
+	const sf::Color Defined::LightGrey = sf::Color(175, 175, 175, 255);
 	const sf::Color Defined::DarkCyan = sf::Color(11, 129, 133, 255);
 	RecentFileStore Defined::RecentFiles;
 
@@ -990,13 +1112,22 @@ namespace ui
 		SELECT_ALL,
 
 		CONTINUE_1,
-		CONTINUE_2
+		CONTINUE_2,
+
+		SAVE,
+		SAVE_AS,
+		EXPORT,
+		OPEN,
+		START_MENU,
+		CLOSE_ATLAS,
+
+		BACK_1
 	};
 	class ActionResult
 	{
 	public:
-		const ActionEvent eventTag;
-		const std::string obj;
+		ActionEvent eventTag;
+		std::string obj;
 
 		ActionResult(const ActionEvent event = ActionEvent::NONE, const std::string& object = "") :
 			eventTag(event),
@@ -1004,6 +1135,13 @@ namespace ui
 		{}
 
 		inline ActionEvent getActionEvent() const { return eventTag; }
+
+		ActionResult& operator=(const ActionResult& other)
+		{
+			eventTag = other.eventTag;
+			obj = other.obj;
+			return *this;
+		}
 	};
 	inline bool operator==(const ActionResult& lhs, const ActionResult& rhs) { return lhs.eventTag == rhs.eventTag; }
 
@@ -1076,11 +1214,39 @@ namespace ui
 			_text.setPosition(static_cast<int>(position.x), static_cast<int>(position.y));
 		}
 
+		inline void setText(const std::string& text)
+		{
+			_text.setString(text);
+		}
+
+		inline void setPosition(const sf::Vector2f& position)
+		{
+			_text.setPosition(position);
+		}
+		inline sf::Vector2f getPosition() const
+		{
+			return _text.getPosition();
+		}
+		inline sf::Vector2f getSize() const
+		{
+			return sf::Vector2f(_text.getGlobalBounds().width, _text.getGlobalBounds().height);
+		}
+
 		inline void draw(sf::RenderWindow& window) const
 		{
 			window.draw(_text);
 		}
+
+		static inline sf::Vector2f below(const TextBox& object)
+		{
+			return sf::Vector2f(object.getPosition().x, object.getPosition().y + object.getSize().y + 1.0);
+		}
+		static inline sf::Vector2f after(const TextBox& object)
+		{
+			return sf::Vector2f(object.getPosition().x + object.getSize().x + 1.0, object.getPosition().y);
+		}
 	};
+
 
 	class DragNDropHelper
 	{
@@ -1139,6 +1305,10 @@ namespace ui
 		inline virtual void setPosition(const sf::Vector2f& position)
 		{
 			_back.setPosition(position);
+		}
+		inline virtual void setSize(const sf::Vector2f& size)
+		{
+			_back.setSize(size);
 		}
 
 		inline bool contains(const sf::Vector2f& point) const { return _back.getGlobalBounds().contains(point); }
@@ -1206,6 +1376,7 @@ namespace ui
 			const ActionEvent returnEvent,
 			const sf::Font& font = Defined::DefaultFont,
 			const TextAlignment alignment = TextAlignment::Center,
+			const bool resizeToFit = false,
 			const sf::Color& fillColor = sf::Color(0, 0, 0, 0),
 			const sf::Color& textColor = sf::Color(255, 255, 255, 255)
 		) :
@@ -1225,12 +1396,21 @@ namespace ui
 					_text.setString(text.substr(0, textLen - 3) + "...");
 			}
 
-			if (alignment == TextAlignment::Center)
-				_text.setPosition(static_cast<int>(position.x + (size.x - _text.getGlobalBounds().width) / 2.0), static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
-			else if (alignment == TextAlignment::Left)
+			if (resizeToFit)
+			{
 				_text.setPosition(position.x + 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
-			else if (alignment == TextAlignment::Right)
-				_text.setPosition(position.x + size.x - _text.getGlobalBounds().width - 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
+				if(_text.getGlobalBounds().width + 20 > size.x)
+					setSize(sf::Vector2f(_text.getGlobalBounds().width + 20, size.y));
+			}
+			else
+			{
+				if (alignment == TextAlignment::Center)
+					_text.setPosition(static_cast<int>(position.x + (size.x - _text.getGlobalBounds().width) / 2.0), static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
+				else if (alignment == TextAlignment::Left)
+					_text.setPosition(position.x + 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
+				else if (alignment == TextAlignment::Right)
+					_text.setPosition(position.x + size.x - _text.getGlobalBounds().width - 5, static_cast<int>(position.y + (size.y - _text.getGlobalBounds().height) / 2.0));
+			}
 		}
 
 		inline void setPosition(const sf::Vector2f& position) override
@@ -1265,14 +1445,29 @@ namespace ui
 			const ActionEvent returnEvent,
 			const sf::Font& font = Defined::DefaultFont,
 			const TextAlignment alignment = TextAlignment::Center,
+			const bool resizeToFit = false,
 			const sf::Color& fillColor = sf::Color(0, 0, 0, 0),
 			const sf::Color& textColor = sf::Color(255, 255, 255, 255)
 		) :
-			TextButton(size, position, textSize, text, returnEvent, font, alignment, fillColor, textColor)
+			TextButton(size, position, textSize, text, returnEvent, font, alignment, resizeToFit, fillColor, textColor)
 		{}
 
 		inline bool isSelected() const { return _isSelected; }
 		inline void setSelected(const bool boolean) { _isSelected = boolean; }
+
+		inline virtual void setHovered(const bool value)
+		{
+			if (value)
+			{
+				_back.setFillColor(sf::Color(_originalColor.r + 50, _originalColor.g + 50, _originalColor.b + 50, _originalColor.a));
+				_back.setOutlineThickness(-1.0);
+			}
+			else
+			{
+				_back.setFillColor(_originalColor);
+				_back.setOutlineThickness(0.0);
+			}
+		}
 
 		void draw(sf::RenderWindow &window, const sf::Vector2f& point) override final
 		{
@@ -1325,7 +1520,7 @@ namespace ui
 			const sf::Color& fillColor = sf::Color(0, 0, 0, 0),
 			const sf::Color& textColor = sf::Color(255, 255, 255, 255)
 		) :
-			SelectableTextButton(size, position, textSize, defaultText, returnEvent, font, TextAlignment::Left, fillColor, textColor),
+			SelectableTextButton(size, position, textSize, defaultText, returnEvent, font, TextAlignment::Left, false, fillColor, textColor),
 			_defaultText(defaultText),
 			_textColor(textColor),
 			_cursor(sf::Vector2f(1.0, textSize + 8.0)),
@@ -1378,6 +1573,7 @@ namespace ui
 			moveCursor(str.size());
 			_checkEmptyString();
 		}
+		inline void clearContent() { _inputString = ""; _checkEmptyString(); }
 
 		inline const std::string getContent() const { return _inputString.size() ? _inputString : _defaultText; }
 
@@ -1581,6 +1777,9 @@ namespace ui
 		inline void add(Button* element) { _content.push_back(element); }
 		inline void remove(const size_t idx) { delete _content[idx]; _content.erase(_content.begin() + idx); }
 
+		inline size_t size() const { return _content.size(); }
+		inline const Button& back() const { return *_content.back(); }
+
 		inline const int contains(const sf::Vector2f& point)
 		{
 			for (int i = _content.size() - 1; i >= 0; --i)
@@ -1601,6 +1800,63 @@ namespace ui
 			for (size_t i = 0; i < _content.size(); ++i)
 				_content[i]->draw(window, point);
 		}
+
+		Button& operator[](std::size_t idx) { return *_content[idx]; }
+		const Button& operator[](std::size_t idx) const { return *_content[idx]; }
+	};
+	template<> class Vector <SelectableTextButton>
+	{
+		std::vector<SelectableTextButton*> _content;
+
+	public:
+		Vector() {}
+		Vector(const Vector& vector) = delete;
+
+		~Vector()
+		{
+			for (size_t i = 0; i < _content.size(); ++i)
+				delete _content[i];
+		}
+
+		inline void add(SelectableTextButton* element) { _content.push_back(element); }
+		inline void remove(const size_t idx) { delete _content[idx]; _content.erase(_content.begin() + idx); }
+
+		inline void select(const size_t idx)
+		{
+			_content[idx]->setSelected(true);
+		}
+		inline void deselectAll()
+		{
+			for (size_t i = 0; i < _content.size(); ++i)
+				_content[i]->setSelected(false);
+		}
+
+		inline size_t size() const { return _content.size(); }
+		inline const SelectableTextButton& back() const { return *_content.back(); }
+
+		inline const int contains(const sf::Vector2f& point)
+		{
+			for (int i = _content.size() - 1; i >= 0; --i)
+				if (_content[i]->contains(point))
+					return i;
+			return -1;
+		}
+
+		inline void clear()
+		{
+			for (size_t i = 0; i < _content.size(); ++i)
+				delete _content[i];
+			_content.clear();
+		}
+
+		void drawAll(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			for (size_t i = 0; i < _content.size(); ++i)
+				_content[i]->draw(window, point);
+		}
+
+		SelectableTextButton& operator[](std::size_t idx) { return *_content[idx]; }
+		const SelectableTextButton& operator[](std::size_t idx) const { return *_content[idx]; }
 	};
 
 	class OptionsMenu
@@ -1633,9 +1889,9 @@ namespace ui
 	public:
 		AtlasOptionsMenu() :
 			OptionsMenu(),
-			_addImageB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Add Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey),
-			_selectAllB(sf::Vector2f(100.0, 24.0), Button::below(_addImageB), 14, "Select All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::Grey),
-			_deleteAllB(sf::Vector2f(100.0, 24.0), Button::below(_selectAllB), 14, "Delete All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::RedDarkGrey)
+			_addImageB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Add Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::Grey),
+			_selectAllB(sf::Vector2f(100.0, 24.0), Button::below(_addImageB), 14, "Select All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::Grey),
+			_deleteAllB(sf::Vector2f(100.0, 24.0), Button::below(_selectAllB), 14, "Delete All", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::RedDarkGrey)
 		{}
 
 		void setPosition(const sf::Vector2f& position) override
@@ -1676,7 +1932,7 @@ namespace ui
 	public:
 		ImageOptionsMenu() :
 			OptionsMenu(),
-			_deleteB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Delete", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::RedDarkGrey)
+			_deleteB(sf::Vector2f(100.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "Delete", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::RedDarkGrey)
 		{}
 
 		void setPosition(const sf::Vector2f& position) override
@@ -1701,17 +1957,69 @@ namespace ui
 			_deleteB.draw(window, point);
 		}
 	};
+	class FileOptionsMenu : public OptionsMenu
+	{
+		TextButton _saveB, _saveAsB, _exportB, _openB, _startMenuB, _closeB;
+
+	public:
+		FileOptionsMenu(const sf::Vector2f& position) :
+			OptionsMenu(),
+			_saveB(sf::Vector2f(120.0, 24.0), position, 14, "Save", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::Grey),
+			_saveAsB(sf::Vector2f(120.0, 24.0), Button::below(_saveB), 14, "Save As", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::Grey),
+			_exportB(sf::Vector2f(120.0, 24.0), Button::below(_saveAsB), 14, "Export Image", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::Grey),
+			_openB(sf::Vector2f(120.0, 24.0), Button::below(_exportB), 14, "Open Atlas", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::Grey),
+			_startMenuB(sf::Vector2f(120.0, 24.0), Button::below(_openB), 14, "Start Menu", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::Grey),
+			_closeB(sf::Vector2f(120.0, 24.0), Button::below(_startMenuB), 14, "Close Atlas", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::RedDarkGrey)
+		{}
+
+		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		{
+			if (event.type == sf::Event::MouseButtonPressed)
+			{
+				if (_saveB.contains(mousePosition))
+					return ActionEvent::SAVE;
+				else if (_saveAsB.contains(mousePosition))
+					return ActionEvent::SAVE_AS;
+				else if (_exportB.contains(mousePosition))
+					return ActionEvent::EXPORT;
+				else if (_openB.contains(mousePosition))
+					return ActionEvent::OPEN;
+				else if (_startMenuB.contains(mousePosition))
+					return ActionEvent::START_MENU;
+				else if (_closeB.contains(mousePosition))
+					return ActionEvent::CLOSE_ATLAS;
+			}
+			return ActionEvent::NONE;
+		}
+
+		void setPosition(const sf::Vector2f& position) override
+		{
+			_back.setPosition(_saveB.getPosition());
+		}
+
+		void draw(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			_back.draw(window);
+			_saveB.draw(window, point);
+			_saveAsB.draw(window, point);
+			_exportB.draw(window, point);
+			_openB.draw(window, point);
+			_startMenuB.draw(window, point);
+			_closeB.draw(window, point);
+		}
+	};
 
 	class Atlas
 	{
-		std::string _name;
+		std::string _name, _path;
 		ImageVector _images;
 		Background _back;
 
 	public:
-		Atlas(const std::string& name = "New Atlas") :
+		Atlas(const std::string& name = "New Atlas", const std::string& path = "") :
 			_name(name),
-			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), sf::Color(100, 100, 100, 255))
+			_path(path),
+			_back(sf::Vector2f(1180.0, 700.0), sf::Vector2f(10.0, 74.0), Defined::MediumLightGrey)
 		{
 			_images.setPosition(sf::Vector2f(10.0, 74.0));
 		}
@@ -1720,6 +2028,8 @@ namespace ui
 
 		inline std::string getName() const { return _name; }
 		inline void setName(const std::string& name) { _name = name; }
+		inline std::string getPath() const { return _path; }
+		inline void setPath(const std::string& path) { _path = path; }
 
 		inline bool contains(const sf::Vector2f& point) const { return _back.contains(point); }
 
@@ -1729,7 +2039,15 @@ namespace ui
 			_images.draw(window, showOverlapped);
 		}
 
-		void saveToFile(const std::string& path, const bool allowOverwrite) const
+		bool save() 
+		{
+			if (_path.size() == 0)
+				return false;
+
+			saveToFile(_path.substr(0, _path.rfind('\\')), true);
+			return true;
+		}
+		void saveToFile(const std::string& path, const bool allowOverwrite)
 		{
 			std::string temp;
 			if (allowOverwrite)
@@ -1738,6 +2056,9 @@ namespace ui
 				temp = util::toString(os::getAvailableDir(util::toWide(path + "\\" + _name)));
 
 			CreateDirectoryA(temp.c_str(), NULL);
+
+			_path = temp;
+
 			std::ofstream out(temp + "\\" + _name + ".atl");
 			if (!out)
 				return;
@@ -1759,6 +2080,8 @@ namespace ui
 
 			if (!in)
 				return atl;
+
+			atl.setPath(filepath.substr(0, filepath.rfind('\\')));
 
 			std::string version;
 			getline(in, version);
@@ -1786,14 +2109,34 @@ namespace ui
 		DragNDropHelper _dragger;
 		Background _generalBg, _upBg, _downBg, _leftBg, _rightBg;
 		SelectableTextButton _fileB, _viewB, _settingsB;
-		Vector<Button> _tabButtons;
+		Vector <SelectableTextButton> _tabButtons;
 		AtlasOptionsMenu _optionsMenu;
 		ImageOptionsMenu _imageMenu;
+		FileOptionsMenu _fileMenu;
 		SelectedArea _selection;
+		TextBox _imagePosition,_imageSize, _imageScaledSize, _imageScale, _imageNameV, _imagePositionV, _imageSizeV, _imageScaledSizeV, _imageScaleV, _mousePosV;
+
+		pk::Packer _packer;
 
 		os::OpenFileDialog _openFileDialog;
 		os::SaveFileDialog _saveFileDialog;
 		os::SelectFolderDialog _selectFolderDialog;
+
+		inline void _removeAtlas(const size_t idx)
+		{
+			if (idx >= _tabs.size())
+				return;
+
+			_tabs.erase(_tabs.begin() + idx);
+			_tabButtons.remove(idx);
+
+			if (_tabButtons.size())
+			{
+				_tabButtons[0].setPosition(sf::Vector2f(10.0, 50.0));
+				for (size_t i = 1; i < _tabButtons.size(); ++i)
+					_tabButtons[i].setPosition(Button::after(_tabButtons[i - 1]));
+			}
+		}
 
 		inline void _setZoomPrecision(sf::Vector2f& up, sf::Vector2f& down)
 		{
@@ -1848,6 +2191,52 @@ namespace ui
 						_tabs[_frontTab].accessData().deleteImages(true);
 					}
 				}
+				else if (_fileMenu.isOpen())
+				{
+					optionsResult = _fileMenu.handleEvent(event, mousePos).getActionEvent();
+					if (optionsResult == ActionEvent::SAVE)
+					{
+						if(!_tabs[_frontTab].save())
+							_selectFolderDialog.start();
+					}
+					else if (optionsResult == ActionEvent::SAVE_AS)
+					{
+						_selectFolderDialog.start();
+					}
+					else if (optionsResult == ActionEvent::EXPORT)
+					{
+						_saveFileDialog.start();
+					}
+					else if (optionsResult == ActionEvent::OPEN)
+					{
+
+					}
+					else if (optionsResult == ActionEvent::START_MENU)
+					{
+						_fileMenu.close();
+						_fileB.setSelected(false);
+						return ActionEvent::BACK_1;
+					}
+					else if (optionsResult == ActionEvent::CLOSE_ATLAS)
+					{
+						_removeAtlas(_frontTab);
+						if (_tabs.size() == 0)
+						{
+							_fileMenu.close();
+							_fileB.setSelected(false);
+							return ActionEvent::BACK_1;
+						}
+						if (_frontTab >= _tabs.size())
+							_frontTab = _tabs.size() - 1;
+					}
+
+					if (optionsResult != ActionEvent::NONE)
+					{
+						_fileMenu.close();
+						_fileB.setSelected(false);
+						continue;
+					}
+				}
 				
 				switch (event.type)
 				{
@@ -1861,13 +2250,21 @@ namespace ui
 						const int clicked = _tabButtons.contains(mousePos);
 						if (clicked != -1)
 						{
+							_selectTab(clicked);
 						}
 
 						if (_fileB.contains(mousePos))
 						{
 							_fileB.setSelected(true);
+							_fileMenu.open(sf::Vector2f(0.0, 0.0));
+							_optionsMenu.close();
+							_imageMenu.close();
 						}
-						else _fileB.setSelected(false);
+						else
+						{
+							_fileB.setSelected(false);
+							_fileMenu.close();
+						}
 
 						if (_viewB.contains(mousePos))
 						{
@@ -1880,8 +2277,6 @@ namespace ui
 						if (_settingsB.contains(mousePos))
 						{
 							_settingsB.setSelected(true);
-							//_selectFolderDialog.start();
-							_saveFileDialog.start();
 						}
 						else _settingsB.setSelected(false);
 
@@ -1910,17 +2305,20 @@ namespace ui
 								_imageMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
 								_tabs[_frontTab].accessData().select(mousePos);
 								_optionsMenu.close();
+								_fileMenu.close();
 							}
 							else
 							{
 								_optionsMenu.open(mousePos + sf::Vector2f(1.0, 1.0));
 								_imageMenu.close();
+								_fileMenu.close();
 							}
 						}
 						else
 						{
 							_optionsMenu.close();
 							_imageMenu.close();
+							_fileMenu.close();
 						}
 					}
 				}
@@ -1960,6 +2358,18 @@ namespace ui
 						_tabs[_frontTab].accessData().applyScale(down, _tabs[_frontTab].accessData().anySelected());
 				}
 				break;
+
+				case sf::Event::KeyPressed:
+				{
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::P))
+					{
+						_packer.loadRects(_tabs[_frontTab].accessData());
+						_packer.packImages();
+						_packer.applyChanges();
+						_tabs[_frontTab].accessData().applyBasePosition();
+					}
+				}
+				break;
 				case sf::Event::Closed:
 					return ActionEvent::WINDOW_CLOSED;
 				}
@@ -1967,12 +2377,15 @@ namespace ui
 			return ActionEvent::NONE;
 		}
 
-		void _selectTab(size_t tabIdx)
+		void _selectTab(const size_t tabIdx)
 		{
-			if (tabIdx < _tabs.size())
-			{
-				_frontTab = tabIdx;
-			}
+			if (tabIdx >= _tabs.size() || (tabIdx == _frontTab && _tabs.size() != 1))
+				return;
+			_tabButtons[_frontTab].setHovered(false);
+			_frontTab = tabIdx;
+			_tabButtons.deselectAll();
+			_tabButtons.select(tabIdx);
+			_tabButtons[tabIdx].setHovered(true);
 		}
 
 		void _displayEditor()
@@ -2001,7 +2414,36 @@ namespace ui
 			if (_imageMenu.isOpen())
 				_imageMenu.draw(_window, mousePos);
 
+			if (_fileMenu.isOpen())
+				_fileMenu.draw(_window, mousePos);
+
 			_selection.draw(_window);
+
+			_imageSize.draw(_window);
+			_imagePosition.draw(_window);
+			_imageScaledSize.draw(_window);
+			_imageScale.draw(_window);
+
+			const img::ImageBox* temp = _tabs[_frontTab].accessData().getSingleSelected();
+			if (temp)
+			{
+				_imageNameV.setText(temp->getNameTag());
+				_imagePositionV.setText(std::to_string(static_cast<int>(temp->getPosition().x)) + "x, " + std::to_string(static_cast<int>(temp->getPosition().y)) + 'y');
+				_imageSizeV.setText(std::to_string(static_cast<int>(temp->getSize().x)) + " x " + std::to_string(static_cast<int>(temp->getSize().y)) + "px");
+				_imageScaledSizeV.setText(std::to_string(static_cast<int>(temp->getScaledSize().x)) + " x " + std::to_string(static_cast<int>(temp->getScaledSize().y)) + "px");
+				_imageScaleV.setText('(' + std::to_string(temp->getScale().x) + ", " + std::to_string(temp->getScale().y) + ')');
+				_imageNameV.draw(_window);
+				_imagePositionV.draw(_window);
+				_imageSizeV.draw(_window);
+				_imageScaledSizeV.draw(_window);
+				_imageScaleV.draw(_window);
+			}
+
+			if (_tabs[_frontTab].contains(mousePos))
+				_mousePosV.setText(std::to_string(static_cast<int>(mousePos.x - 10)) + "x, " + std::to_string(static_cast<int>(mousePos.y - 75)) + 'y');
+			else
+				_mousePosV.setText("~x, ~y");
+			_mousePosV.draw(_window);
 
 			_window.display();
 		}
@@ -2014,18 +2456,34 @@ namespace ui
 			_leftBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
 			_downBg(sf::Vector2f(window.getSize().x, 25.0), sf::Vector2f(0.0, 775.0), Defined::DarkGrey),
 			_rightBg(sf::Vector2f(10.0, window.getSize().y), sf::Vector2f(1190.0, 0.0), Defined::DarkGrey),
-			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_viewB(sf::Vector2f(50.0, 24.0), Button::after(_fileB), 14, "View", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_settingsB(sf::Vector2f(90.0, 24.0), Button::after(_viewB), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, Defined::DarkGrey),
-			_openFileDialog(window.getSystemHandle(), L"Atlas files\0.atl\0", nullptr, true),
+			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
+			_viewB(sf::Vector2f(50.0, 24.0), Button::after(_fileB), 14, "View", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
+			_settingsB(sf::Vector2f(90.0, 24.0), Button::after(_viewB), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
+			_openFileDialog(window.getSystemHandle(), L"Image files (.bmp, .png, .tga, .jpg)\0", nullptr, true),
 			_saveFileDialog(window.getSystemHandle(), L"Image files (.bmp, .png, .tga, .jpg)\0.bmp;.png;.tga;.jpg\0", nullptr, false),
-			_selectFolderDialog(window.getSystemHandle())
+			_selectFolderDialog(window.getSystemHandle()),
+			_fileMenu(Button::below(_fileB) + sf::Vector2f(10.0, 0)),
+			_imagePosition(sf::Vector2f(320.0, 780.0), 12, "Position: ", Defined::DefaultFont, Defined::LightGrey),
+			_imageSize(sf::Vector2f(470.0, 780.0), 12, "Original Size: ", Defined::DefaultFont, Defined::LightGrey),
+			_imageScaledSize(sf::Vector2f(670.0, 780.0), 12, "Size: ", Defined::DefaultFont, Defined::LightGrey),
+			_imageScale(sf::Vector2f(820.0, 780.0), 12, "Scale: ", Defined::DefaultFont, Defined::LightGrey),
+			_imageNameV(sf::Vector2f(20.0, 779.0), 14, ""),
+			_imagePositionV(TextBox::after(_imagePosition) - sf::Vector2f(0.0, 1.0), 14, ""),
+			_imageSizeV(TextBox::after(_imageSize) - sf::Vector2f(0.0, 1.0), 14, ""),
+			_imageScaledSizeV(TextBox::after(_imageScaledSize) - sf::Vector2f(0.0, 1.0), 14, ""),
+			_imageScaleV(TextBox::after(_imageScale) - sf::Vector2f(0.0, 1.0), 14, ""),
+			_mousePosV(sf::Vector2f(1120.0, 780.0), 12, "", Defined::DefaultFont, Defined::LightGrey),
+			_packer(sf::Vector2i(100000, 100000))
 		{}
 
 		void addAtlas(Atlas&& atlas)
 		{
+			std::string temp = atlas.getName();
 			_tabs.emplace_back(std::move(atlas));
-			_tabButtons.add(new SelectableTextButton(sf::Vector2f(100.0, 24.0), sf::Vector2f((_tabs.size() - 1) * 100.0 + 10.0, 50.0), 14, atlas.getName(), ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, Defined::DarkGrey));
+			if(_tabButtons.size() == 0)
+				_tabButtons.add(new SelectableTextButton(sf::Vector2f(0.0, 24.0), sf::Vector2f(10.0, 50.0), 14, temp, ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, true, Defined::DarkGrey));
+			else
+				_tabButtons.add(new SelectableTextButton(sf::Vector2f(0.0, 24.0), sf::Vector2f(Button::after(_tabButtons.back())), 14, temp, ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, true, Defined::DarkGrey));
 			_selectTab(_tabs.size() - 1);
 		}
 
@@ -2034,7 +2492,7 @@ namespace ui
 			while (_window.isOpen())
 			{
 				const ActionResult responseEvent = _handleDefaultEvents();
-				if (responseEvent == ActionEvent::WINDOW_CLOSED)
+				if (responseEvent == ActionEvent::WINDOW_CLOSED || responseEvent == ActionEvent::BACK_1)
 					return responseEvent;
 
 				if (_openFileDialog.isStarted() && _openFileDialog.isReady())
@@ -2042,7 +2500,7 @@ namespace ui
 					std::vector<std::string> paths = util::separatePaths(util::toString(_openFileDialog.getPath()));
 					for (int i = 0; i < paths.size(); ++i)
 						if(paths[i].size())
-							_tabs[_frontTab].accessData().addImage(paths[i]);
+							_tabs[_frontTab].accessData().addImage(paths[i], i == 0);
 					_selection.clear();
 					_tabs[_frontTab].accessData().deselectAll();
 				}
@@ -2054,13 +2512,15 @@ namespace ui
 				if (_selectFolderDialog.isStarted() && _selectFolderDialog.isReady())
 				{
 					if (_selectFolderDialog.getPath().size())
+					{
 						_tabs[_frontTab].saveToFile(util::toString(_selectFolderDialog.getPath()), true);
-					Defined::RecentFiles.add(_tabs[_frontTab].getName(), util::toString(_selectFolderDialog.getPath()) + "\\" + _tabs[_frontTab].getName() + "\\" + _tabs[_frontTab].getName() + ".atl");
+						Defined::RecentFiles.add(_tabs[_frontTab].getName(), util::toString(_selectFolderDialog.getPath()) + "\\" + _tabs[_frontTab].getName() + "\\" + _tabs[_frontTab].getName() + ".atl");
+					}
 				}
 
 				_displayEditor();
 			}
-
+			return ActionEvent::NONE;
 		}
 	};
 
@@ -2101,6 +2561,7 @@ namespace ui
 					ActionEvent::BUTTON_CLICKED_3,
 					Defined::DefaultFont,
 					TextAlignment::Left,
+					false,
 					sf::Color(20, 20, 20, 255),
 					sf::Color(255 - i * 20, 255 - i * 20, 255 - i * 20, 255)));
 			}
@@ -2113,7 +2574,7 @@ namespace ui
 			{
 				switch (event.type)
 				{
-				case sf::Event::MouseButtonReleased:
+				case sf::Event::MouseButtonPressed:
 				{
 					const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
 
@@ -2153,7 +2614,7 @@ namespace ui
 			{
 				switch (event.type)
 				{
-				case sf::Event::MouseButtonReleased:
+				case sf::Event::MouseButtonPressed:
 				{
 					const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
 					_nameBox.setSelected(_nameBox.contains(mousePos));
@@ -2255,19 +2716,20 @@ namespace ui
 			_back1(sf::Vector2f(300.0, window.getSize().y), sf::Vector2f(0.0, 0.0), Defined::DarkGrey),
 			_back2(sf::Vector2f(window.getSize().x - 300, window.getSize().y), sf::Vector2f(300.0, 0.0), sf::Color(sf::Color(40, 40, 40, 255))),
 			_recentsTextBox(sf::Vector2f(50.0, 200.0), 16, "Recent files:", Defined::DefaultFont, sf::Color(11, 129, 133, 255)),
-			_newButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 50.0), 18, "Create New Atlas", ActionEvent::BUTTON_CLICKED_1, Defined::DefaultFont, TextAlignment::Left, sf::Color(40, 40, 40, 255)),
-			_openButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 120.0), 18, "Open Existing Atlas", ActionEvent::BUTTON_CLICKED_2, Defined::DefaultFont, TextAlignment::Left, sf::Color(40, 40, 40, 255)),
+			_newButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 50.0), 18, "Create New Atlas", ActionEvent::BUTTON_CLICKED_1, Defined::DefaultFont, TextAlignment::Left, false, sf::Color(40, 40, 40, 255)),
+			_openButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 120.0), 18, "Open Existing Atlas", ActionEvent::BUTTON_CLICKED_2, Defined::DefaultFont, TextAlignment::Left, false, sf::Color(40, 40, 40, 255)),
 			_enterNameTextBox(sf::Vector2f(350.0, 50.0), 14, "New Atlas Name: ", Defined::DefaultFont, sf::Color(180, 180, 180, 255)),
 			_nameBox(sf::Vector2f(400.0, 50.0), sf::Vector2f(350.0, 70.0), 16, "NewAtlas", ActionEvent::INPUTBOX_ENTER_1, Defined::DefaultFont, Defined::AlphaNumeric, Defined::DarkGrey),
 			_tickBox(sf::Vector2f(20.0, 20.0), sf::Vector2f(350.0, 130.0), ActionEvent::TICKBOX_MODIFIED_1, false, Defined::DarkGrey),
-			_continueButton(sf::Vector2f(100.0, 40.0), sf::Vector2f(1050.0, 720.0), 18, "Continue", ActionEvent::BUTTON_CLICKED_3, Defined::DefaultFont, TextAlignment::Center, Defined::DarkCyan),
+			_continueButton(sf::Vector2f(100.0, 40.0), sf::Vector2f(1050.0, 720.0), 18, "Continue", ActionEvent::BUTTON_CLICKED_3, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkCyan),
 			_intBox(sf::Vector2f(60.0, 40.0), sf::Vector2f(300.0, 170.0), 16, 0, 255, ActionEvent::INPUTBOX_ENTER_2, Defined::DefaultFont, Defined::DarkGrey, sf::Color(255, 255, 0, 255)),
 			_colBox(50.0, sf::Vector2f(400.0, 170.0), &_intBox),
-			_openFileDialog(_window.getSystemHandle())
+			_openFileDialog(window.getSystemHandle())
 		{}
 
 		ActionResult run()
 		{
+			_nameBox.clearContent();
 			_loadRecentButtons();
 			while (true)
 			{
@@ -2298,7 +2760,7 @@ namespace ui
 
 	public:
 		UIDriver(const sf::VideoMode& videoMode) :
-			_window(videoMode, "< Aspershine >"),
+			_window(videoMode, "Aspershine - Texture Packer"),
 			_startMenu(_window),
 			_editor(_window)
 		{
@@ -2310,19 +2772,23 @@ namespace ui
 		{
 			while (_window.isOpen())
 			{
-				ActionResult returnEvent = _startMenu.run();
-				if (returnEvent == ActionEvent::WINDOW_CLOSED)
+				ActionResult startReturnEvent = _startMenu.run();
+				ActionResult editorReturnEvent = ActionEvent::NONE;
+				if (startReturnEvent == ActionEvent::WINDOW_CLOSED)
 					_window.close();
-				else if (returnEvent == ActionEvent::CONTINUE_1)
+				else if (startReturnEvent == ActionEvent::CONTINUE_1)
 				{
-					_editor.addAtlas(Atlas(returnEvent.obj));
-					_editor.run();
+					_editor.addAtlas(Atlas(startReturnEvent.obj));
+					editorReturnEvent = _editor.run();
 				}
-				else if (returnEvent == ActionEvent::CONTINUE_2)
+				else if (startReturnEvent == ActionEvent::CONTINUE_2)
 				{
-					_editor.addAtlas(std::move(Atlas::loadFromFile(returnEvent.obj)));
-					_editor.run();
+					_editor.addAtlas(std::move(Atlas::loadFromFile(startReturnEvent.obj)));
+					editorReturnEvent = _editor.run();
 				}
+
+				if (editorReturnEvent == ActionEvent::WINDOW_CLOSED)
+					_window.close();
 			}
 		}
 	};
