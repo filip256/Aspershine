@@ -816,7 +816,7 @@ namespace img
 		ImageBox& operator[](std::size_t idx) { return *_images[idx]; }
 		const ImageBox& operator[](std::size_t idx) const { return *_images[idx]; }
 
-		bool exportToImage(const std::string& path) const
+		bool exportToImage(const std::string& path, const bool createMapFile) const
 		{
 			if (_images.size() == 0)
 				return false;
@@ -837,7 +837,28 @@ namespace img
 						result.setPixel(_images[i]->getPosition().x + offset.x + x, _images[i]->getPosition().y + offset.y + y, image.getPixel(x, y));
 					}
 			}
-			return result.saveToFile(path);
+			
+			if (!result.saveToFile(path))
+				return false;
+
+			if (createMapFile)
+			{
+				std::ofstream out(path.substr(0, path.rfind('.') + 1) + "atlm");
+
+				if (!out)
+					return false;
+
+				for (size_t i = 0; i < _images.size(); ++i)
+				{
+					out
+						<< _images[i]->getNameTag() << ':'
+						<< _images[i]->getPosition().x + offset.x << ':'
+						<< _images[i]->getPosition().y + offset.y << ':'
+						<< static_cast<int>(_images[i]->getScaledSize().x) << ':'
+						<< static_cast<int>(_images[i]->getScaledSize().y) << '\n';
+				}
+			}
+			return true;
 		}
 		void saveToFile(const std::string& path) const
 		{
@@ -884,15 +905,15 @@ namespace pk
 		
 
 	public:
-		Rect(img::ImageBox& imageBox)
+		Rect(img::ImageBox& imageBox, const sf::Vector2i& margin)
 			:
 			imgBox(imageBox)
 		{
 			sf::FloatRect temp = imgBox.getBounds();
 			this->x = temp.left;
 			this->y = temp.top;
-			this->w = temp.width + 5;
-			this->h = temp.height + 5;
+			this->w = temp.width + margin.x;
+			this->h = temp.height + margin.y;
 		}
 
 
@@ -902,41 +923,52 @@ namespace pk
 			imgBox.setPosition(sf::Vector2f(this->x, this->y));
 		}
 	};
+
+	class PackerSettings
+	{
+	public:
+		bool allowRotation;
+		sf::Vector2i maxSize, margin;
+
+		PackerSettings(const sf::Vector2i& maxSize, const sf::Vector2i& margin, const bool allowRotation) :
+			allowRotation(allowRotation),
+			maxSize(maxSize),
+			margin(margin)
+		{}
+	};
+
 	class Packer
 	{
-		bool allowFlips;
-		int max_w, max_h;
+		PackerSettings _settings;
 		std::vector<Rect> rects;
 
 	public:
-		Packer(const sf::Vector2i& maxSize, const bool allowRotation = false)
-			:
-			allowFlips(allowRotation),
-			max_w(maxSize.x),
-			max_h(maxSize.y)
-		{
+		Packer(const PackerSettings& settings) :
+			_settings(settings)
+		{}
 
-		}
+		inline void changeSettings(const PackerSettings& settings) { _settings = settings; }
 
 		void loadRects(img::ImageVector& images)
 		{
 			rects.clear();
 
 			for (size_t i = 0; i < images.size(); ++i)
-				rects.emplace_back(Rect(images[i]));
+				rects.emplace_back(Rect(images[i], _settings.margin));
 		}
 		bool packImages()
 		{
 			std::vector<rect_xywhf*> recPtr;
 
-			for (size_t i = 0; i < rects.size(); ++i) {
+			for (size_t i = 0; i < rects.size(); ++i)
 				recPtr.push_back(&rects[i]);
-			}
 
 			std::vector<bin> bins;
 
-			if (pack(&recPtr[0], recPtr.size(), max_w, max_h, false, bins)) {
-				printf("bins: %d\n", bins.size());
+			if (pack(&recPtr[0], recPtr.size(), _settings.maxSize.x, _settings.maxSize.y, _settings.allowRotation, bins)) 
+			{
+				if (bins.size() != 1)
+					return false;
 
 				for (int i = 0; i < bins.size(); ++i) {
 					printf("\n\nbin: %dx%d, rects: %d\n", bins[i].size.w, bins[i].size.h, bins[i].rects.size());
@@ -948,8 +980,9 @@ namespace pk
 					}
 				}
 			}
-			else {
-				printf("failed: there's a rectangle with width/height bigger than max_size!\n");
+			else
+			{
+				return false;
 			}
 			return true;
 		}
@@ -1121,13 +1154,18 @@ namespace ui
 		START_MENU,
 		CLOSE_ATLAS,
 
+		SHOW_OVERL,
+		HIDE_OVERL,
+
+		KEEP_OPEN,
+
 		BACK_1
 	};
-	class ActionResult
+	template<class T = std::string> class ActionResult
 	{
 	public:
 		ActionEvent eventTag;
-		std::string obj;
+		T obj;
 
 		ActionResult(const ActionEvent event = ActionEvent::NONE, const std::string& object = "") :
 			eventTag(event),
@@ -1143,7 +1181,8 @@ namespace ui
 			return *this;
 		}
 	};
-	inline bool operator==(const ActionResult& lhs, const ActionResult& rhs) { return lhs.eventTag == rhs.eventTag; }
+	template<class T = std::string> inline bool operator==(const ActionResult<T>& lhs, const ActionResult<T>& rhs) { return lhs.eventTag == rhs.eventTag; }
+	template<class T = std::string> inline bool operator==(const ActionResult<T>& lhs, const ActionEvent& rhs) { return lhs.eventTag == rhs; }
 
 	class Background
 	{
@@ -1161,6 +1200,7 @@ namespace ui
 		inline bool contains(const sf::Vector2f& point) const { return _back.getGlobalBounds().contains(point); }
 
 		inline void setPosition(const sf::Vector2f& position) { _back.setPosition(position); }
+		inline void setSize(const sf::Vector2f& size) { _back.setSize(size); }
 		inline void setFillColor(const sf::Color& color) { _back.setFillColor(color); }
 
 		inline void draw(sf::RenderWindow& window) const
@@ -1333,18 +1373,16 @@ namespace ui
 	class TickBox : public Button
 	{
 		bool _isTicked = false;
-		sf::Sprite _tickSprite;
+		sf::RectangleShape _tick;
 
 	public:
 		TickBox(const sf::Vector2f& size, const sf::Vector2f& position, const ActionEvent returnEvent, const bool isTicked = false, const sf::Color& fillColor = sf::Color(0, 0, 0, 0)) :
 			Button(size, position, returnEvent, fillColor),
-			//_tickSprite(Defined::Icons),
+			_tick(size - sf::Vector2f(8.0, 8.0)),
 			_isTicked(isTicked)
 		{
-			_tickSprite.setColor(sf::Color::Green);
-			_tickSprite.setPosition(position);
-
-			_tickSprite.setScale(0.01, 0.01);
+			_tick.setPosition(position + sf::Vector2f(4.0, 4.0));
+			_tick.setFillColor(sf::Color::White);
 		}
 
 		void tick()
@@ -1358,7 +1396,7 @@ namespace ui
 			_checkHovering(point);
 			window.draw(_back);
 			if(_isTicked)
-				window.draw(_tickSprite);
+				window.draw(_tick);
 		}
 	};
 	class TextButton : public Button
@@ -1613,12 +1651,13 @@ namespace ui
 			const unsigned short int textSize,
 			const int minValue,
 			const int maxValue,
+			const int defaultValue,
 			const ActionEvent returnEvent,
 			const sf::Font& font = Defined::DefaultFont,
 			const sf::Color& fillColor = sf::Color(0, 0, 0, 0),
 			const sf::Color& textColor = sf::Color(255, 255, 255, 255)
 		) :
-			InputBox(size, position, textSize, std::to_string((minValue + maxValue) / 2), returnEvent, font, "", fillColor, textColor),
+			InputBox(size, position, textSize, std::to_string(defaultValue), returnEvent, font, "", fillColor, textColor),
 			_minValue(minValue),
 			_maxValue(maxValue)
 		{}
@@ -1680,7 +1719,7 @@ namespace ui
 			_checkEmptyString();
 		}
 
-		int getValue() const { return _inputString.size() ? ((_inputString[0] == '-' && _inputString.size() == 1) ? 0 : std::stoi(_inputString)) : (_minValue + _maxValue) / 2; }
+		int getValue() const { return _inputString.size() ? ((_inputString[0] == '-' && _inputString.size() == 1) ? 0 : std::stoi(_inputString)) : std::stoi(_defaultText); }
 		void modifyValue(const int delta)
 		{
 			const int temp = getValue() + delta;
@@ -1902,7 +1941,7 @@ namespace ui
 			_deleteAllB.setPosition(Button::below(_selectAllB));
 		}
 
-		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		ActionResult<> handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
 			if (event.type == sf::Event::MouseButtonPressed)
 			{
@@ -1941,7 +1980,7 @@ namespace ui
 			_deleteB.setPosition(position);
 		}
 
-		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		ActionResult<> handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
 			if (event.type == sf::Event::MouseButtonPressed)
 			{
@@ -1972,7 +2011,7 @@ namespace ui
 			_closeB(sf::Vector2f(120.0, 24.0), Button::below(_startMenuB), 14, "Close Atlas", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Left, false, Defined::RedDarkGrey)
 		{}
 
-		ActionResult handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		ActionResult<> handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
 		{
 			if (event.type == sf::Event::MouseButtonPressed)
 			{
@@ -2008,6 +2047,173 @@ namespace ui
 			_closeB.draw(window, point);
 		}
 	};
+	class ViewOptionsMenu : public OptionsMenu
+	{
+		TextBox _showOverlapped;
+		TickBox _showOverlappedTB;
+
+	public:
+		ViewOptionsMenu(const sf::Vector2f& position) :
+			OptionsMenu(),
+			_showOverlapped(position + sf::Vector2f(28.0, 4.0), 14, "Show overlapped"),
+			_showOverlappedTB(sf::Vector2f(18.0, 18.0), position + sf::Vector2f(3.0, 3.0), ActionEvent::NONE, false, Defined::MediumLightGrey)
+		{
+			_back.setSize(sf::Vector2f(180.0, 24.0));
+			_back.setPosition(position);
+		}
+
+		ActionResult<> handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		{
+			if (event.type == sf::Event::MouseButtonPressed)
+			{
+				if (_showOverlappedTB.contains(mousePosition))
+				{
+					_showOverlappedTB.tick();
+					return _showOverlappedTB.isTicked() ? ActionEvent::SHOW_OVERL : ActionEvent::HIDE_OVERL;
+				}
+				else if (_back.contains(mousePosition))
+					return ActionEvent::KEEP_OPEN;
+			}
+			return ActionEvent::NONE;
+		}
+
+		void setPosition(const sf::Vector2f& position) override {}
+
+		bool getShowOverlapped() const { return _showOverlappedTB.isTicked(); }
+
+		void draw(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			_back.draw(window);
+			_showOverlapped.draw(window);
+			_showOverlappedTB.draw(window, point);
+		}
+	};
+
+	class ErrorMenu
+	{
+		//
+	};
+
+	class SettingsMenu
+	{
+		bool _isOpen = false;
+		Background _back;
+		TextBox _packerSettings, _dimensions, _maxWidth, _maxHeight, _margins, _xMargin, _yMargin;
+		IntegerInputBox _maxWidthV, _maxHeightV, _xMarginV, _yMarginV;
+		sf::Clock _clock;
+
+	public:
+		SettingsMenu(const sf::Vector2f& position) :
+			_back(sf::Vector2f(400.0, 400.0), position, Defined::Grey),
+			_packerSettings(position + sf::Vector2f(10.0, 10.0), 16, "Packer Settings"),
+			_dimensions(TextBox::below(_packerSettings) + sf::Vector2f(10.0, 10.0), 14, "Maximum atlas size (in pixels)"),
+			_maxWidth(TextBox::below(_dimensions) + sf::Vector2f(10.0, 12.0), 14, "Max Width:", Defined::DefaultFont, Defined::LightGrey),
+			_maxHeight(TextBox::after(_maxWidth) + sf::Vector2f(80.0, 0.0), 14, "Max Height:", Defined::DefaultFont, Defined::LightGrey),
+			_margins(TextBox::below(_maxWidth) + sf::Vector2f(-10.0, 20.0), 14, "Image margins (in pixels)"),
+			_xMargin(TextBox::below(_margins) + sf::Vector2f(10.0, 12.0), 14, "X-Margin:", Defined::DefaultFont, Defined::LightGrey),
+			_yMargin(TextBox::after(_xMargin) + sf::Vector2f(80.0, 0.0), 14, "Y-Margin:", Defined::DefaultFont, Defined::LightGrey),
+			_maxWidthV(sf::Vector2f(64.0, 34.0), TextBox::after(_maxWidth) + sf::Vector2f(0.0, -10.0), 14, 0, 65536, 65536, ActionEvent::NONE, Defined::DefaultFont, Defined::Grey),
+			_maxHeightV(sf::Vector2f(64.0, 34.0), TextBox::after(_maxHeight) + sf::Vector2f(0.0, -10.0), 14, 0, 65536, 65536, ActionEvent::NONE, Defined::DefaultFont, Defined::Grey),
+			_xMarginV(sf::Vector2f(36.0, 34.0), TextBox::after(_xMargin) + sf::Vector2f(0.0, -10.0), 14, 0, 32, 0, ActionEvent::NONE, Defined::DefaultFont, Defined::Grey),
+			_yMarginV(sf::Vector2f(36.0, 34.0), TextBox::after(_yMargin) + sf::Vector2f(0.0, -10.0), 14, 0, 32, 0, ActionEvent::NONE, Defined::DefaultFont, Defined::Grey)
+		{}
+
+		inline void open() { _isOpen = true; }
+		pk::PackerSettings close() 
+		{ 
+			_isOpen = false;
+
+			return pk::PackerSettings(
+				sf::Vector2i(_maxWidthV.getValue(), _maxHeightV.getValue()),
+				sf::Vector2i(_xMarginV.getValue(), _xMarginV.getValue()),
+				false);
+		}
+		inline bool isOpen() const { return _isOpen; }
+
+		ActionResult<> handleEvent(const sf::Event& event, const sf::Vector2f& mousePosition)
+		{
+			if (event.type == sf::Event::MouseButtonPressed)
+			{
+				_maxWidthV.setSelected(_maxWidthV.contains(mousePosition));
+				_maxHeightV.setSelected(_maxHeightV.contains(mousePosition));
+				_xMarginV.setSelected(_xMarginV.contains(mousePosition));
+				_yMarginV.setSelected(_yMarginV.contains(mousePosition));
+
+				if (_back.contains(mousePosition))
+					return ActionEvent::KEEP_OPEN;
+			}
+			else if (event.type == sf::Event::KeyPressed)
+			{
+				if (event.key.code == sf::Keyboard::Left)
+				{
+					if (_maxWidthV.isSelected())
+						_maxWidthV.moveCursor(-1);
+					else if(_maxHeightV.isSelected())
+						_maxHeightV.moveCursor(-1);
+					else if (_xMarginV.isSelected())
+						_xMarginV.moveCursor(-1);
+					else if (_yMarginV.isSelected())
+						_yMarginV.moveCursor(-1);
+				}
+				else if (event.key.code == sf::Keyboard::Right)
+				{
+					if (_maxWidthV.isSelected())
+						_maxWidthV.moveCursor(1);
+					else if (_maxHeightV.isSelected())
+						_maxHeightV.moveCursor(1);
+					else if (_xMarginV.isSelected())
+						_xMarginV.moveCursor(1);
+					else if (_yMarginV.isSelected())
+						_yMarginV.moveCursor(1);
+				}
+				else if (sf::Keyboard::isKeyPressed(sf::Keyboard::LControl) && sf::Keyboard::isKeyPressed(sf::Keyboard::V))
+				{
+					if (_maxWidthV.isSelected())
+						_maxWidthV.insertString(os::SystemData::getFromClipboard());
+					else if (_maxHeightV.isSelected())
+						_maxHeightV.insertString(os::SystemData::getFromClipboard());
+					else if (_xMarginV.isSelected())
+						_xMarginV.insertString(os::SystemData::getFromClipboard());
+					else if (_yMarginV.isSelected())
+						_yMarginV.insertString(os::SystemData::getFromClipboard());
+				}
+			}
+			else if (event.type == sf::Event::TextEntered)
+			{
+				if (_maxWidthV.isSelected())
+					_maxWidthV.modifyString(event.text.unicode);
+				else if (_maxHeightV.isSelected())
+					_maxHeightV.modifyString(event.text.unicode);
+				else if (_xMarginV.isSelected())
+					_xMarginV.modifyString(event.text.unicode);
+				else if (_yMarginV.isSelected())
+					_yMarginV.modifyString(event.text.unicode);
+			}
+			return ActionEvent::NONE;
+		}
+
+		void draw(sf::RenderWindow& window, const sf::Vector2f& point)
+		{
+			_back.draw(window);
+			_packerSettings.draw(window);
+			_dimensions.draw(window);
+			_maxWidth.draw(window);
+			_maxHeight.draw(window);
+			_margins.draw(window);
+			_xMargin.draw(window);
+			_yMargin.draw(window);
+
+			bool cursor = (_clock.getElapsedTime().asMilliseconds() / Defined::CursorBlinkInterval) & 1;
+			_maxWidthV.draw(window, point, cursor);
+			_maxHeightV.draw(window, point, cursor);
+			_xMarginV.draw(window, point, cursor);
+			_yMarginV.draw(window, point, cursor);
+
+		}
+	};
+	
+
+	// todo: packer settings, map file export, copy paste image and atlas, errors
 
 	class Atlas
 	{
@@ -2068,9 +2274,9 @@ namespace ui
 
 			_images.saveToFile(temp + "\\" + _name + "_img");
 		}
-		bool exportToImage(const std::string& path) const
+		bool exportToImage(const std::string& path, const bool createMapFile) const
 		{
-			return _images.exportToImage(path);
+			return _images.exportToImage(path, createMapFile);
 		}
 
 		static Atlas loadFromFile(const std::string& filepath)
@@ -2108,13 +2314,16 @@ namespace ui
 
 		DragNDropHelper _dragger;
 		Background _generalBg, _upBg, _downBg, _leftBg, _rightBg;
-		SelectableTextButton _fileB, _viewB, _settingsB;
+		SelectableTextButton _fileB, _viewB, _settingsB, _packB;
 		Vector <SelectableTextButton> _tabButtons;
 		AtlasOptionsMenu _optionsMenu;
 		ImageOptionsMenu _imageMenu;
 		FileOptionsMenu _fileMenu;
+		ViewOptionsMenu _viewMenu;
 		SelectedArea _selection;
 		TextBox _imagePosition,_imageSize, _imageScaledSize, _imageScale, _imageNameV, _imagePositionV, _imageSizeV, _imageScaledSizeV, _imageScaleV, _mousePosV;
+
+		SettingsMenu _settingsMenu;
 
 		pk::Packer _packer;
 
@@ -2237,6 +2446,18 @@ namespace ui
 						continue;
 					}
 				}
+				else if (_viewMenu.isOpen())
+				{
+					optionsResult = _viewMenu.handleEvent(event, mousePos).getActionEvent();
+					if (optionsResult == ActionEvent::HIDE_OVERL)
+					{
+						_tabs[_frontTab].accessData().clearOverlapped();
+					}
+				}
+				else if (_settingsMenu.isOpen())
+				{
+					optionsResult = _settingsMenu.handleEvent(event, mousePos).getActionEvent();
+				}
 				
 				switch (event.type)
 				{
@@ -2268,19 +2489,41 @@ namespace ui
 
 						if (_viewB.contains(mousePos))
 						{
-							_viewB.setSelected(!_viewB.isSelected());
-							if (!_viewB.isSelected())
-								_tabs[_frontTab].accessData().clearOverlapped();
+							_viewB.setSelected(true);
+							_viewMenu.open(sf::Vector2f(0.0, 0.0));
+							_optionsMenu.close();
+							_imageMenu.close();
 						}
-						//else _viewB.setSelected(false);
+						else if(optionsResult != ActionEvent::KEEP_OPEN && optionsResult != ActionEvent::SHOW_OVERL && optionsResult != ActionEvent::HIDE_OVERL)
+						{
+							_viewB.setSelected(false);
+							_viewMenu.close();
+						}
 
 						if (_settingsB.contains(mousePos))
 						{
 							_settingsB.setSelected(true);
+							_settingsMenu.open();
+							_optionsMenu.close();
+							_imageMenu.close();
 						}
-						else _settingsB.setSelected(false);
+						else if(optionsResult != ActionEvent::KEEP_OPEN)
+						{
+							_settingsB.setSelected(false);
+							_packer.changeSettings(_settingsMenu.close());
+						}
 
-						if (optionsResult != ActionEvent::SELECT_ALL && optionsResult != ActionEvent::DELETE_IMAGE)
+						if (_packB.contains(mousePos))
+						{
+							_packer.loadRects(_tabs[_frontTab].accessData());
+							if (_packer.packImages())
+							{
+								_packer.applyChanges();
+								_tabs[_frontTab].accessData().applyBasePosition();
+							}
+						}
+
+						if (optionsResult == ActionEvent::NONE)
 						{
 							if (_tabs[_frontTab].contains(mousePos))
 							{
@@ -2361,12 +2604,22 @@ namespace ui
 
 				case sf::Event::KeyPressed:
 				{
-					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::P))
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up))
+						_tabs[_frontTab].accessData().setPosition(_tabs[_frontTab].accessData().getPosition() + sf::Vector2f(0.0, -10.0));
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))
+						_tabs[_frontTab].accessData().setPosition(_tabs[_frontTab].accessData().getPosition() + sf::Vector2f(0.0, 10.0));
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Left))
+						_tabs[_frontTab].accessData().setPosition(_tabs[_frontTab].accessData().getPosition() + sf::Vector2f(-10.0, 0.0));
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Right))
+						_tabs[_frontTab].accessData().setPosition(_tabs[_frontTab].accessData().getPosition() + sf::Vector2f(10.0, 0.0));
+
+					if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LControl))
 					{
-						_packer.loadRects(_tabs[_frontTab].accessData());
-						_packer.packImages();
-						_packer.applyChanges();
-						_tabs[_frontTab].accessData().applyBasePosition();
+						if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
+						{
+							if (!_tabs[_frontTab].save())
+								_selectFolderDialog.start();
+						}
 					}
 				}
 				break;
@@ -2395,7 +2648,7 @@ namespace ui
 
 			//_generalBg.draw(_window);
 
-			_tabs[_frontTab].draw(_window, _viewB.isSelected());
+			_tabs[_frontTab].draw(_window, _viewMenu.getShowOverlapped());
 
 			_upBg.draw(_window);
 			_leftBg.draw(_window);
@@ -2405,6 +2658,7 @@ namespace ui
 			_fileB.draw(_window, mousePos);
 			_viewB.draw(_window, mousePos);
 			_settingsB.draw(_window, mousePos);
+			_packB.draw(_window, mousePos);
 
 			_tabButtons.drawAll(_window, mousePos);
 
@@ -2416,6 +2670,12 @@ namespace ui
 
 			if (_fileMenu.isOpen())
 				_fileMenu.draw(_window, mousePos);
+
+			if (_viewMenu.isOpen())
+				_viewMenu.draw(_window, mousePos);
+
+			if (_settingsMenu.isOpen())
+				_settingsMenu.draw(_window, mousePos);
 
 			_selection.draw(_window);
 
@@ -2459,10 +2719,13 @@ namespace ui
 			_fileB(sf::Vector2f(50.0, 24.0), sf::Vector2f(0.0, 0.0), 14, "File", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
 			_viewB(sf::Vector2f(50.0, 24.0), Button::after(_fileB), 14, "View", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
 			_settingsB(sf::Vector2f(90.0, 24.0), Button::after(_viewB), 14, "Settings", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
+			_packB(sf::Vector2f(50.0, 24.0), Button::after(_settingsB), 14, "Pack", ActionEvent::NONE, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkGrey),
 			_openFileDialog(window.getSystemHandle(), L"Image files (.bmp, .png, .tga, .jpg)\0", nullptr, true),
 			_saveFileDialog(window.getSystemHandle(), L"Image files (.bmp, .png, .tga, .jpg)\0.bmp;.png;.tga;.jpg\0", nullptr, false),
 			_selectFolderDialog(window.getSystemHandle()),
-			_fileMenu(Button::below(_fileB) + sf::Vector2f(10.0, 0)),
+			_fileMenu(Button::below(_fileB) + sf::Vector2f(10.0, 0.0)),
+			_viewMenu(Button::below(_viewB)),
+			_settingsMenu(Button::below(_settingsB) + sf::Vector2f(-10.0, 0.0)),
 			_imagePosition(sf::Vector2f(320.0, 780.0), 12, "Position: ", Defined::DefaultFont, Defined::LightGrey),
 			_imageSize(sf::Vector2f(470.0, 780.0), 12, "Original Size: ", Defined::DefaultFont, Defined::LightGrey),
 			_imageScaledSize(sf::Vector2f(670.0, 780.0), 12, "Size: ", Defined::DefaultFont, Defined::LightGrey),
@@ -2473,11 +2736,16 @@ namespace ui
 			_imageScaledSizeV(TextBox::after(_imageScaledSize) - sf::Vector2f(0.0, 1.0), 14, ""),
 			_imageScaleV(TextBox::after(_imageScale) - sf::Vector2f(0.0, 1.0), 14, ""),
 			_mousePosV(sf::Vector2f(1120.0, 780.0), 12, "", Defined::DefaultFont, Defined::LightGrey),
-			_packer(sf::Vector2i(100000, 100000))
-		{}
+			_packer(pk::PackerSettings(sf::Vector2i(65536, 65536), sf::Vector2i(0, 0), false))
+		{
+			_tabs.reserve(30);
+		}
 
 		void addAtlas(Atlas&& atlas)
 		{
+			if (_tabs.size() >= 30)
+				return;
+
 			std::string temp = atlas.getName();
 			_tabs.emplace_back(std::move(atlas));
 			if(_tabButtons.size() == 0)
@@ -2487,11 +2755,11 @@ namespace ui
 			_selectTab(_tabs.size() - 1);
 		}
 
-		ActionResult run()
+		ActionResult<> run()
 		{
 			while (_window.isOpen())
 			{
-				const ActionResult responseEvent = _handleDefaultEvents();
+				const ActionResult<> responseEvent = _handleDefaultEvents();
 				if (responseEvent == ActionEvent::WINDOW_CLOSED || responseEvent == ActionEvent::BACK_1)
 					return responseEvent;
 
@@ -2507,7 +2775,7 @@ namespace ui
 				if (_saveFileDialog.isStarted() && _saveFileDialog.isReady())
 				{
 					if (_saveFileDialog.getPath().size())
-						_tabs[_frontTab].exportToImage(util::toString(_saveFileDialog.getPath()));
+						_tabs[_frontTab].exportToImage(util::toString(_saveFileDialog.getPath()), true);
 				}
 				if (_selectFolderDialog.isStarted() && _selectFolderDialog.isReady())
 				{
@@ -2543,9 +2811,6 @@ namespace ui
 		Vector<Button> _buttons;
 		TextBox _recentsTextBox, _enterNameTextBox;
 		InputBox _nameBox;
-		TickBox _tickBox;
-		IntegerInputBox _intBox;
-		ColorBox _colBox;
 		sf::Mouse _mouse;
 		os::OpenFileDialog _openFileDialog;
 
@@ -2567,7 +2832,7 @@ namespace ui
 			}
 		}
 
-		ActionResult _handleDefaultEvents()
+		ActionResult<> _handleDefaultEvents()
 		{
 			sf::Event event;
 			while (_window.pollEvent(event))
@@ -2582,7 +2847,7 @@ namespace ui
 					const int clicked = _buttons.contains(mousePos);
 					if (clicked != -1)
 					{
-						return ActionResult(ActionEvent::CONTINUE_2, Defined::RecentFiles[clicked].path);
+						return ActionResult<>(ActionEvent::CONTINUE_2, Defined::RecentFiles[clicked].path);
 					}
 
 					if (_newButton.contains(mousePos))
@@ -2607,7 +2872,7 @@ namespace ui
 			}
 			return ActionEvent::NONE;
 		}
-		ActionResult _handleNewAtlasEvents()
+		ActionResult<> _handleNewAtlasEvents()
 		{
 			sf::Event event;
 			while (_window.pollEvent(event))
@@ -2619,8 +2884,6 @@ namespace ui
 					const sf::Vector2f mousePos = static_cast<sf::Vector2f>(_mouse.getPosition(_window));
 					_nameBox.setSelected(_nameBox.contains(mousePos));
 
-					if (_tickBox.contains(mousePos)) _tickBox.tick();
-
 					if (_openButton.contains(mousePos))
 					{
 						_openButton.setSelected(true);
@@ -2631,7 +2894,7 @@ namespace ui
 
 					if (_continueButton.contains(mousePos))
 					{
-						return ActionResult(ActionEvent::CONTINUE_1, _nameBox.getContent());
+						return ActionResult<>(ActionEvent::CONTINUE_1, _nameBox.getContent());
 					}
 				}
 				break;
@@ -2670,7 +2933,7 @@ namespace ui
 			return ActionEvent::NONE;
 		}
 
-		ActionResult _handleEvents()
+		ActionResult<> _handleEvents()
 		{
 			switch (_state)
 			{
@@ -2698,7 +2961,6 @@ namespace ui
 				_back2.draw(_window);
 				_enterNameTextBox.draw(_window);
 				_nameBox.draw(_window, static_cast<sf::Vector2f>(_mouse.getPosition(_window)), (_clock.getElapsedTime().asMilliseconds() / Defined::CursorBlinkInterval) & 1);
-				_tickBox.draw(_window, static_cast<sf::Vector2f>(_mouse.getPosition(_window)));
 				_continueButton.draw(_window, static_cast<sf::Vector2f>(_mouse.getPosition(_window)));
 			}
 
@@ -2720,14 +2982,11 @@ namespace ui
 			_openButton(sf::Vector2f(200.0, 40.0), sf::Vector2f(50.0, 120.0), 18, "Open Existing Atlas", ActionEvent::BUTTON_CLICKED_2, Defined::DefaultFont, TextAlignment::Left, false, sf::Color(40, 40, 40, 255)),
 			_enterNameTextBox(sf::Vector2f(350.0, 50.0), 14, "New Atlas Name: ", Defined::DefaultFont, sf::Color(180, 180, 180, 255)),
 			_nameBox(sf::Vector2f(400.0, 50.0), sf::Vector2f(350.0, 70.0), 16, "NewAtlas", ActionEvent::INPUTBOX_ENTER_1, Defined::DefaultFont, Defined::AlphaNumeric, Defined::DarkGrey),
-			_tickBox(sf::Vector2f(20.0, 20.0), sf::Vector2f(350.0, 130.0), ActionEvent::TICKBOX_MODIFIED_1, false, Defined::DarkGrey),
 			_continueButton(sf::Vector2f(100.0, 40.0), sf::Vector2f(1050.0, 720.0), 18, "Continue", ActionEvent::BUTTON_CLICKED_3, Defined::DefaultFont, TextAlignment::Center, false, Defined::DarkCyan),
-			_intBox(sf::Vector2f(60.0, 40.0), sf::Vector2f(300.0, 170.0), 16, 0, 255, ActionEvent::INPUTBOX_ENTER_2, Defined::DefaultFont, Defined::DarkGrey, sf::Color(255, 255, 0, 255)),
-			_colBox(50.0, sf::Vector2f(400.0, 170.0), &_intBox),
 			_openFileDialog(window.getSystemHandle())
 		{}
 
-		ActionResult run()
+		ActionResult<> run()
 		{
 			_nameBox.clearContent();
 			_loadRecentButtons();
@@ -2738,11 +2997,11 @@ namespace ui
 					_openButton.setSelected(false);
 					if (_openFileDialog.getPath().size())
 					{
-						return ActionResult(ActionEvent::CONTINUE_2, util::toString(_openFileDialog.getPath()));
+						return ActionResult<>(ActionEvent::CONTINUE_2, util::toString(_openFileDialog.getPath()));
 					}
 				}
 
-				const ActionResult responseEvent = _handleEvents();
+				const ActionResult<> responseEvent = _handleEvents();
 				if(responseEvent == ActionEvent::WINDOW_CLOSED || responseEvent == ActionEvent::CONTINUE_1 || responseEvent == ActionEvent::CONTINUE_2)
 					return responseEvent;
 
@@ -2772,8 +3031,8 @@ namespace ui
 		{
 			while (_window.isOpen())
 			{
-				ActionResult startReturnEvent = _startMenu.run();
-				ActionResult editorReturnEvent = ActionEvent::NONE;
+				ActionResult<> startReturnEvent = _startMenu.run();
+				ActionResult<> editorReturnEvent = ActionEvent::NONE;
 				if (startReturnEvent == ActionEvent::WINDOW_CLOSED)
 					_window.close();
 				else if (startReturnEvent == ActionEvent::CONTINUE_1)
